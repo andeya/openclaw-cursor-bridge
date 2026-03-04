@@ -85,7 +85,7 @@ Share the `.tgz` with teammates — they run `openclaw plugins install <file>.tg
 
 ## Configuration
 
-All options go in `openclaw.json` under `plugins.entries.cursor-brain.config`:
+All options go in `openclaw.json` under `plugins.entries.openclaw-cursor-brain.config`:
 
 | Option          | Type     | Default        | Description                                                                                                |
 | --------------- | -------- | -------------- | ---------------------------------------------------------------------------------------------------------- |
@@ -99,7 +99,7 @@ Example:
 {
   "plugins": {
     "entries": {
-      "cursor-brain": {
+      "openclaw-cursor-brain": {
         "enabled": true,
         "config": {
           "model": "auto",
@@ -140,7 +140,7 @@ openclaw gateway restart
 This performs a complete teardown:
 
 1. Removes the plugin config entry (`openclaw plugins uninstall`, auto-confirmed)
-2. Deletes the plugin directory `~/.openclaw/extensions/cursor-brain`
+2. Deletes the plugin directory `~/.openclaw/extensions/openclaw-cursor-brain`
 3. Cleans up all custom configuration (see table below)
 4. Prompts you to restart the gateway
 
@@ -149,9 +149,9 @@ This performs a complete teardown:
 | `~/.cursor/mcp.json`                          | `openclaw-gateway` MCP server entry |
 | `openclaw.json` `agents.defaults.cliBackends` | `cursor-cli` backend config         |
 | `openclaw.json` `agents.defaults.model`       | `cursor-cli/*` model references     |
-| `openclaw.json` `plugins.entries`             | `cursor-brain` registration        |
+| `openclaw.json` `plugins.entries`             | `openclaw-cursor-brain` registration |
 
-> **Warning:** Do not run `openclaw plugins uninstall cursor-brain` directly — it only removes the config entry, not the custom configuration above. If you did this by mistake, manually edit `~/.cursor/mcp.json` and `~/.openclaw/openclaw.json` to remove the leftover entries.
+> **Warning:** Do not run `openclaw plugins uninstall openclaw-cursor-brain` directly — it only removes the config entry, not the custom configuration above. If you did this by mistake, manually edit `~/.cursor/mcp.json` and `~/.openclaw/openclaw.json` to remove the leftover entries.
 
 ## Auto-configured Files
 

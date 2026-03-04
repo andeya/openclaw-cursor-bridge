@@ -113,7 +113,7 @@ export function runSetup(ctx: SetupContext): SetupResult {
 
   if (!result.cursorPath) {
     result.errors.push(
-      "Cursor Agent CLI not found. Install it from https://cursor.sh or set plugins.entries.cursor-brain.config.cursorPath"
+      "Cursor Agent CLI not found. Install it from https://cursor.sh or set plugins.entries.openclaw-cursor-brain.config.cursorPath"
     );
     return result;
   }

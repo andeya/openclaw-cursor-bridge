@@ -86,7 +86,7 @@ openclaw cursor-brain status
 
 ## 配置选项
 
-在 `openclaw.json` 中 `plugins.entries.cursor-brain.config` 下可配置：
+在 `openclaw.json` 中 `plugins.entries.openclaw-cursor-brain.config` 下可配置：
 
 | 参数            | 类型   | 默认值         | 说明                                                                   |
 | --------------- | ------ | -------------- | ---------------------------------------------------------------------- |
@@ -100,7 +100,7 @@ openclaw cursor-brain status
 {
   "plugins": {
     "entries": {
-      "cursor-brain": {
+      "openclaw-cursor-brain": {
         "enabled": true,
         "config": {
           "model": "auto",
@@ -147,7 +147,7 @@ openclaw gateway restart
 自动执行四步：
 
 1. 移除插件配置注册（`openclaw plugins uninstall` 自动确认）
-2. 删除插件目录 `~/.openclaw/extensions/cursor-brain`
+2. 删除插件目录 `~/.openclaw/extensions/openclaw-cursor-brain`
 3. 清理自定义配置（见下表）
 4. 提示重启 gateway
 
@@ -158,9 +158,9 @@ openclaw gateway restart
 | `~/.cursor/mcp.json`                          | 移除 `openclaw-gateway` MCP server 条目 |
 | `openclaw.json` `agents.defaults.cliBackends` | 移除 `cursor-cli` 后端配置              |
 | `openclaw.json` `agents.defaults.model`       | 移除 `cursor-cli/*` 模型引用            |
-| `openclaw.json` `plugins.entries`             | 移除 `cursor-brain` 注册               |
+| `openclaw.json` `plugins.entries`             | 移除 `openclaw-cursor-brain` 注册      |
 
-> **注意**：不要直接执行 `openclaw plugins uninstall cursor-brain`，它只移除配置条目，不会清理上表中的自定义配置。
+> **注意**：不要直接执行 `openclaw plugins uninstall openclaw-cursor-brain`，它只移除配置条目，不会清理上表中的自定义配置。
 > 如果误操作，需手动编辑 `~/.cursor/mcp.json` 和 `~/.openclaw/openclaw.json` 移除相关条目。
 
 ## 自动配置写入的内容

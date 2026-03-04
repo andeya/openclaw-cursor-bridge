@@ -1,5 +1,5 @@
 {
-  "id": "cursor-brain",
+  "id": "openclaw-cursor-brain",
   "name": "Cursor Brain",
   "description": "Use Cursor Agent as the AI brain for OpenClaw via MCP",
   "skills": ["./skills"],

@@ -46,7 +46,7 @@
     ],
     "install": {
       "npmSpec": "openclaw-cursor-brain",
-      "localPath": "extensions/cursor-brain",
+      "localPath": "extensions/openclaw-cursor-brain",
       "defaultChoice": "local"
     }
   }
