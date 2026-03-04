@@ -116,7 +116,7 @@ export function formatDoctorResults(checks: CheckResult[]): string {
   const passed = checks.filter((c) => c.ok).length;
   lines.push("", `${passed}/${checks.length} checks passed`);
   if (passed < checks.length) {
-    lines.push("Run `openclaw cursor-bridge setup` to fix configuration issues.");
+    lines.push("Run `openclaw cursor-brain setup` to fix configuration issues.");
   }
   return lines.join("\n");
 }

@@ -95,7 +95,7 @@ const plugin = {
 
     api.registerCli((ctx) => {
       const prog = ctx.program
-        .command("cursor-bridge")
+        .command("cursor-brain")
         .description("Cursor Agent MCP bridge management");
 
       prog
@@ -256,7 +256,7 @@ const plugin = {
           console.log("  openclaw gateway restart");
         });
 
-    }, { commands: ["cursor-bridge"] });
+    }, { commands: ["cursor-brain"] });
   },
 };
 

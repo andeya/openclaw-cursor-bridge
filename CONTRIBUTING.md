@@ -1,12 +1,12 @@
-# Contributing to cursor-bridge
+# Contributing to cursor-brain
 
 Thank you for your interest in contributing! Here's how to get started.
 
 ## Development Setup
 
 ```bash
-git clone https://github.com/andeya/openclaw-cursor-bridge.git
-cd openclaw-cursor-bridge
+git clone https://github.com/andeya/openclaw-cursor-brain.git
+cd openclaw-cursor-brain
 npm install
 ```
 
@@ -15,22 +15,22 @@ npm install
 Install the plugin from your local working copy:
 
 ```bash
-openclaw plugins install /path/to/openclaw-cursor-bridge
+openclaw plugins install /path/to/openclaw-cursor-brain
 openclaw gateway restart
 ```
 
 After making changes, sync to the installed directory or use the upgrade command:
 
 ```bash
-openclaw cursor-bridge upgrade /path/to/openclaw-cursor-bridge
+openclaw cursor-brain upgrade /path/to/openclaw-cursor-brain
 openclaw gateway restart
 ```
 
 ### Verify Your Changes
 
 ```bash
-openclaw cursor-bridge doctor   # Health check
-openclaw cursor-bridge status   # Configuration overview
+openclaw cursor-brain doctor   # Health check
+openclaw cursor-brain status   # Configuration overview
 ```
 
 ## Project Structure
@@ -45,7 +45,7 @@ src/
 mcp-server/
   server.mjs          → MCP bridge server (tool discovery + REST proxy)
 skills/
-  cursor-bridge/
+  cursor-brain/
     SKILL.md          → Agent skill description for Cursor
 ```
 
@@ -61,14 +61,14 @@ skills/
 
 1. Fork the repository and create a feature branch
 2. Make your changes following the guidelines above
-3. Test locally with `openclaw cursor-bridge doctor`
+3. Test locally with `openclaw cursor-brain doctor`
 4. Submit a pull request with a clear description
 
 ## Reporting Issues
 
 Please include:
 
-- Output of `openclaw cursor-bridge doctor`
-- Output of `openclaw cursor-bridge status`
+- Output of `openclaw cursor-brain doctor`
+- Output of `openclaw cursor-brain status`
 - Your OS and Node.js version
 - Steps to reproduce the issue

@@ -1,7 +1,7 @@
 import { homedir } from "os";
 import { join } from "path";
 
-export const PLUGIN_ID = "cursor-bridge";
+export const PLUGIN_ID = "cursor-brain";
 export const MCP_SERVER_ID = "openclaw-gateway";
 export const CLI_BACKEND_ID = "cursor-cli";
 

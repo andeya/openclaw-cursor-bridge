@@ -1,11 +1,11 @@
 <p align="center">
-  <h1 align="center">openclaw-cursor-bridge</h1>
+  <h1 align="center">openclaw-cursor-brain</h1>
   <p align="center">
     Use <a href="https://cursor.sh">Cursor</a> as the AI brain for <a href="https://github.com/openclaw/openclaw">OpenClaw</a> — with full access to every plugin tool.
   </p>
   <p align="center">
-    <a href="https://www.npmjs.com/package/openclaw-cursor-bridge"><img src="https://img.shields.io/npm/v/openclaw-cursor-bridge.svg" alt="npm version"></a>
-    <a href="https://www.npmjs.com/package/openclaw-cursor-bridge"><img src="https://img.shields.io/npm/dm/openclaw-cursor-bridge.svg" alt="npm downloads"></a>
+    <a href="https://www.npmjs.com/package/openclaw-cursor-brain"><img src="https://img.shields.io/npm/v/openclaw-cursor-brain.svg" alt="npm version"></a>
+    <a href="https://www.npmjs.com/package/openclaw-cursor-brain"><img src="https://img.shields.io/npm/dm/openclaw-cursor-brain.svg" alt="npm downloads"></a>
     <a href="https://github.com/openclaw/openclaw"><img src="https://img.shields.io/badge/OpenClaw-Plugin-orange.svg" alt="OpenClaw Plugin"></a>
     <a href="https://cursor.sh"><img src="https://img.shields.io/badge/Cursor-Agent%20CLI-purple.svg" alt="Cursor"></a>
     <a href="https://nodejs.org"><img src="https://img.shields.io/badge/Node.js-%3E%3D18-green.svg" alt="Node.js >= 18"></a>
@@ -17,7 +17,7 @@
 
 ---
 
-**cursor-bridge** is an [OpenClaw](https://github.com/openclaw/openclaw) plugin that turns [Cursor Agent CLI](https://cursor.sh) into a fully-integrated LLM backend. It bridges all OpenClaw plugin tools (Feishu, Slack, GitHub, custom plugins, etc.) to Cursor through the [Model Context Protocol (MCP)](https://modelcontextprotocol.io), so the AI can call them natively.
+**openclaw-cursor-brain** is an [OpenClaw](https://github.com/openclaw/openclaw) plugin that turns [Cursor Agent CLI](https://cursor.sh) into a fully-integrated LLM backend. It bridges all OpenClaw plugin tools (Feishu, Slack, GitHub, custom plugins, etc.) to Cursor through the [Model Context Protocol (MCP)](https://modelcontextprotocol.io), so the AI can call them natively.
 
 **Zero manual config.** Install, restart, done.
 
@@ -54,13 +54,13 @@ Newly installed OpenClaw plugins are **auto-discovered** — no extra configurat
 
 ```bash
 # From local path (development)
-openclaw plugins install /path/to/openclaw-cursor-bridge
+openclaw plugins install /path/to/openclaw-cursor-brain
 
 # From .tgz archive (team distribution)
-openclaw plugins install ./openclaw-cursor-bridge-1.0.0.tgz
+openclaw plugins install ./openclaw-cursor-brain-1.0.0.tgz
 
 # From npm
-openclaw plugins install openclaw-cursor-bridge
+openclaw plugins install openclaw-cursor-brain
 
 # Restart the gateway to load the plugin
 openclaw gateway restart
@@ -69,23 +69,23 @@ openclaw gateway restart
 ### Verify
 
 ```bash
-openclaw cursor-bridge doctor   # Health check
-openclaw cursor-bridge status   # Show configuration
+openclaw cursor-brain doctor   # Health check
+openclaw cursor-brain status   # Show configuration
 ```
 
 ## Building & Packaging
 
 ```bash
-cd /path/to/openclaw-cursor-bridge
+cd /path/to/openclaw-cursor-brain
 npm pack
-# → openclaw-cursor-bridge-<version>.tgz (~12 KB)
+# → openclaw-cursor-brain-<version>.tgz (~12 KB)
 ```
 
 Share the `.tgz` with teammates — they run `openclaw plugins install <file>.tgz` and dependencies install automatically.
 
 ## Configuration
 
-All options go in `openclaw.json` under `plugins.entries.cursor-bridge.config`:
+All options go in `openclaw.json` under `plugins.entries.cursor-brain.config`:
 
 | Option          | Type     | Default        | Description                                                                                                |
 | --------------- | -------- | -------------- | ---------------------------------------------------------------------------------------------------------- |
@@ -99,7 +99,7 @@ Example:
 {
   "plugins": {
     "entries": {
-      "cursor-bridge": {
+      "cursor-brain": {
         "enabled": true,
         "config": {
           "model": "auto",
@@ -117,30 +117,30 @@ Setup is **idempotent** — runs on every gateway start and never duplicates exi
 
 | Command                                   | Description                                                 |
 | ----------------------------------------- | ----------------------------------------------------------- |
-| `openclaw cursor-bridge setup`            | Re-run configuration (writes mcp.json + CLI backend)        |
-| `openclaw cursor-bridge doctor`           | Health check all components                                 |
-| `openclaw cursor-bridge status`           | Show current configuration details                          |
-| `openclaw cursor-bridge upgrade <source>` | One-command upgrade (cleanup → uninstall → install)         |
-| `openclaw cursor-bridge uninstall`        | One-command full uninstall (cleanup configs + remove files) |
+| `openclaw cursor-brain setup`            | Re-run configuration (writes mcp.json + CLI backend)        |
+| `openclaw cursor-brain doctor`           | Health check all components                                 |
+| `openclaw cursor-brain status`           | Show current configuration details                          |
+| `openclaw cursor-brain upgrade <source>` | One-command upgrade (cleanup → uninstall → install)         |
+| `openclaw cursor-brain uninstall`        | One-command full uninstall (cleanup configs + remove files) |
 
 ### Upgrade
 
 ```bash
-openclaw cursor-bridge upgrade ./openclaw-cursor-bridge-2.0.0.tgz
+openclaw cursor-brain upgrade ./openclaw-cursor-brain-2.0.0.tgz
 openclaw gateway restart
 ```
 
 ### Uninstall
 
 ```bash
-openclaw cursor-bridge uninstall
+openclaw cursor-brain uninstall
 openclaw gateway restart
 ```
 
 This performs a complete teardown:
 
 1. Removes the plugin config entry (`openclaw plugins uninstall`, auto-confirmed)
-2. Deletes the plugin directory `~/.openclaw/extensions/cursor-bridge`
+2. Deletes the plugin directory `~/.openclaw/extensions/cursor-brain`
 3. Cleans up all custom configuration (see table below)
 4. Prompts you to restart the gateway
 
@@ -149,9 +149,9 @@ This performs a complete teardown:
 | `~/.cursor/mcp.json`                          | `openclaw-gateway` MCP server entry |
 | `openclaw.json` `agents.defaults.cliBackends` | `cursor-cli` backend config         |
 | `openclaw.json` `agents.defaults.model`       | `cursor-cli/*` model references     |
-| `openclaw.json` `plugins.entries`             | `cursor-bridge` registration        |
+| `openclaw.json` `plugins.entries`             | `cursor-brain` registration        |
 
-> **Warning:** Do not run `openclaw plugins uninstall cursor-bridge` directly — it only removes the config entry, not the custom configuration above. If you did this by mistake, manually edit `~/.cursor/mcp.json` and `~/.openclaw/openclaw.json` to remove the leftover entries.
+> **Warning:** Do not run `openclaw plugins uninstall cursor-brain` directly — it only removes the config entry, not the custom configuration above. If you did this by mistake, manually edit `~/.cursor/mcp.json` and `~/.openclaw/openclaw.json` to remove the leftover entries.
 
 ## Auto-configured Files
 
@@ -252,7 +252,7 @@ No regex, no log parsing — fully structured:
 ## Project Structure
 
 ```
-cursor-bridge/
+cursor-brain/
   package.json              # Dependencies & metadata
   openclaw.plugin.json      # OpenClaw plugin manifest
   index.ts                  # Plugin entry (register + CLI commands)
@@ -264,7 +264,7 @@ cursor-bridge/
   mcp-server/
     server.mjs              # MCP bridge (JSON parsing + REST probing)
   skills/
-    cursor-bridge/
+    cursor-brain/
       SKILL.md              # Agent skill description
 ```
 

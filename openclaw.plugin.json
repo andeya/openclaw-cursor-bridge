@@ -1,5 +1,5 @@
 {
-  "id": "cursor-bridge",
+  "id": "cursor-brain",
   "name": "Cursor Bridge",
   "description": "Bridge OpenClaw Gateway tools to Cursor Agent via MCP",
   "skills": ["./skills"],
