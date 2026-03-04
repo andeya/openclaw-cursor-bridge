@@ -1,0 +1,26 @@
+{
+  "id": "cursor-bridge",
+  "name": "Cursor Bridge",
+  "description": "Bridge OpenClaw Gateway tools to Cursor Agent via MCP",
+  "skills": ["./skills"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "cursorPath": {
+        "type": "string",
+        "description": "Path to cursor agent binary. Leave empty to auto-detect."
+      },
+      "model": {
+        "type": "string",
+        "default": "auto",
+        "description": "Primary Cursor model (used as cursor-cli/<model>)."
+      },
+      "fallbackModel": {
+        "type": "string",
+        "default": "sonnet-4.6",
+        "description": "Fallback model when primary is unavailable."
+      }
+    }
+  }
+}
