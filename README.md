@@ -17,143 +17,152 @@
 
 ---
 
-**openclaw-cursor-brain** is an [OpenClaw](https://github.com/openclaw/openclaw) plugin that turns [Cursor Agent CLI](https://cursor.sh) into a fully-integrated AI backend. It connects all OpenClaw plugin tools (Feishu, Slack, GitHub, custom plugins, etc.) to Cursor through the [Model Context Protocol (MCP)](https://modelcontextprotocol.io), giving the AI native access to every tool.
-
-**Zero manual config.** Install, restart, done.
-
-## How It Works
-
-```
-User message → OpenClaw Gateway → cursor-cli (CLI backend)
-                                       ↓
-                                 Cursor Agent
-                                       ↓
-                             MCP Server (this plugin)
-                                       ↓
-                           Gateway REST API (/tools/invoke)
-                                       ↓
-                             Plugin tools (Feishu, Slack, …)
-```
-
-1. **On install** — auto-configures `~/.cursor/mcp.json` and the `cursor-cli` backend in `openclaw.json`.
-2. **On each conversation** — `cursor-cli` spawns the MCP Server process.
-3. **On MCP Server start** — reads `openclaw.json`, scans installed plugin source files for tool declarations, verifies each via the Gateway REST API, and registers them as MCP tools.
-4. **On tool call** — Cursor Agent calls the tool through MCP; the server proxies it to the Gateway.
-
-Newly installed OpenClaw plugins are **auto-discovered** — no extra configuration needed.
+**openclaw-cursor-brain** is an [OpenClaw](https://github.com/openclaw/openclaw) plugin that turns [Cursor Agent CLI](https://cursor.sh) into a fully-integrated, streaming AI backend via [MCP](https://modelcontextprotocol.io). All OpenClaw plugin tools become natively accessible to Cursor — and vice versa.
 
 ## Quick Start
 
-### Prerequisites
-
-- **Node.js** >= 18
-- **[Cursor CLI](https://cursor.sh)** installed (`agent` command available)
-- **OpenClaw Gateway** running
-
-### Install
-
 ```bash
-# From local path (development)
-openclaw plugins install /path/to/openclaw-cursor-brain
-
-# From .tgz archive (team distribution)
-openclaw plugins install ./openclaw-cursor-brain-1.0.0.tgz
-
-# From npm
 openclaw plugins install openclaw-cursor-brain
-
-# Restart the gateway to load the plugin
+openclaw cursor-brain setup     # interactive model selection
 openclaw gateway restart
+openclaw cursor-brain doctor    # verify
 ```
 
-### Verify
+During **setup** (and **upgrade**), models are dynamically discovered from `cursor-agent --list-models`. Primary is single-select; fallbacks are multi-select (space to toggle), defaulting to all models in cursor's original order:
 
-```bash
-openclaw cursor-brain doctor   # Health check
-openclaw cursor-brain status   # Show configuration
+```
+◆  Select primary model (↑↓ navigate, enter confirm)
+│  ● auto              Auto
+│  ○ opus-4.6-thinking Claude 4.6 Opus (thinking, cursor default)
+│  ○ opus-4.6          Claude 4.6 Opus
+│  ○ sonnet-4.6        Claude 4.6 Sonnet
+│  ○ gpt-5.3-codex     GPT-5.3 Codex
+│  …
+└
+
+◆  Select fallback models (space toggle, enter confirm, order follows list)
+│  ◼ opus-4.6-thinking Claude 4.6 Opus (thinking, cursor default)
+│  ◼ opus-4.6          Claude 4.6 Opus
+│  ◼ sonnet-4.6        Claude 4.6 Sonnet
+│  …
+└
 ```
 
-## Building & Packaging
+## How It Works
 
-```bash
-cd /path/to/openclaw-cursor-brain
-npm pack
-# → openclaw-cursor-brain-<version>.tgz (~12 KB)
+<details>
+<summary><strong>Architecture</strong></summary>
+
+```mermaid
+flowchart TB
+    subgraph path1["OpenClaw → Cursor (AI Backend)"]
+        direction TB
+        User["User Message"] --> GW["OpenClaw Gateway"]
+        GW --> Proxy["Streaming Proxy :18790"]
+        Proxy --> Agent["cursor-agent --stream-partial-output"]
+        Agent --> SSE["Text deltas → SSE stream"]
+    end
+
+    subgraph path2["Cursor → OpenClaw (Tool Calls)"]
+        direction TB
+        IDE["Cursor IDE"] --> MCP["MCP Server (stdio)"]
+        MCP --> REST["Gateway REST API /tools/invoke"]
+        REST --> Tools["Plugin Tools: Feishu · Slack · GitHub · …"]
+    end
+
+    style Proxy fill:#2563eb,color:#fff
+    style SSE fill:#10b981,color:#fff
 ```
 
-Share the `.tgz` with teammates — they run `openclaw plugins install <file>.tgz` and dependencies install automatically.
+</details>
+
+Two auto-configured paths:
+
+1. **Streaming Proxy** — local OpenAI-compatible server (`/v1/chat/completions`) spawns `cursor-agent` with `--stream-partial-output`, streams text deltas as SSE in real-time
+2. **MCP Server** — Cursor IDE calls OpenClaw tools via stdio, proxied to Gateway REST API with timeout/retry
+
+Sessions are persisted to disk and reused via `--resume` for faster subsequent responses (context survives restarts). New plugins are auto-discovered on gateway restart.
+
+## Bidirectional Enhancement
+
+- **OpenClaw gains Cursor AI** — all channels (Slack, Feishu, Web, etc.) get Cursor's frontier models as the AI backend
+- **Cursor IDE gains OpenClaw tools** — all plugin tools auto-registered as MCP tools, letting Cursor natively call Feishu, Slack, GitHub, databases, etc.
+- **Compound effect** — a single agent session can read Slack, write code, push to GitHub, and notify on Feishu — no context switching
+
+## Features
+
+- **Zero config** — install and restart; everything auto-configures
+- **Interactive model selection** — `setup`/`upgrade` present all discovered models via `@clack/prompts` (single-select primary, multi-select ordered fallbacks)
+- **Dynamic model discovery** — models auto-detected from `cursor-agent --list-models`, synced to OpenClaw on every gateway start
+- **Real-time streaming** — `--stream-partial-output` for character-level text deltas; smart-chunked fallback for batch results (~200 chars/s, configurable)
+- **Tool auto-discovery** — source scanning + REST API parallel verification
+- **Session persistence** — cursor-agent sessions persisted to disk (`~/.openclaw/cursor-sessions.json`), surviving proxy and gateway restarts; `--resume` reuses sessions automatically
+- **Standalone proxy** — `streaming-proxy.mjs` runs independently as OpenAI-compatible API (auto-detection, API key auth, CORS)
+- **Reliability** — tool call timeout (60s), retry (2x), structured MCP errors (`isError: true`)
+- **Proxy management** — `proxy status/stop/restart/log` commands for lifecycle control without restarting gateway
+- **Diagnostics** — `doctor` (10+ checks), `status`, and `proxy log` commands
+- **Cross-platform** — macOS, Linux, Windows
 
 ## Configuration
 
-All options go in `openclaw.json` under `plugins.entries.openclaw-cursor-brain.config`:
+In `openclaw.json` under `plugins.entries.openclaw-cursor-brain.config`:
 
-| Option          | Type     | Default        | Description                                                                                                |
-| --------------- | -------- | -------------- | ---------------------------------------------------------------------------------------------------------- |
-| `cursorPath`    | `string` | auto-detect    | Path to the Cursor Agent CLI binary. Leave empty for automatic detection via `which agent` + common paths. |
-| `model`         | `string` | `"auto"`       | Primary model, written as `cursor-cli/<model>` in `agents.defaults.model.primary`.                         |
-| `fallbackModel` | `string` | `"sonnet-4.6"` | Fallback model, written to `agents.defaults.model.fallbacks`.                                              |
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `cursorPath` | string | auto-detect | Path to cursor-agent binary |
+| `model` | string | interactive | Primary model (override to skip interactive selection) |
+| `fallbackModel` | string | interactive | Fallback model override (interactive selection provides ordered multi-fallbacks) |
+| `cursorModel` | string | `""` (auto) | Direct `cursor-agent --model` override (e.g. `sonnet-4.6`, `opus-4.6-thinking`) |
+| `outputFormat` | string | auto-detect | `"stream-json"` or `"json"` |
+| `proxyPort` | number | `18790` | Streaming proxy port |
 
-Example:
+<details>
+<summary><strong>Environment variables</strong></summary>
 
-```json
-{
-  "plugins": {
-    "entries": {
-      "openclaw-cursor-brain": {
-        "enabled": true,
-        "config": {
-          "model": "auto",
-          "fallbackModel": "sonnet-4.6"
-        }
-      }
-    }
-  }
-}
-```
+| Variable | Default | Description |
+|---|---|---|
+| `OPENCLAW_TOOL_TIMEOUT_MS` | `60000` | Tool call timeout (ms) |
+| `OPENCLAW_TOOL_RETRY_COUNT` | `2` | Max retries on transient errors |
+| `CURSOR_PROXY_STREAM_SPEED` | `200` | Chunked streaming speed (chars/sec) |
+| `CURSOR_PROXY_REQUEST_TIMEOUT` | `300000` | Per-request timeout in ms (default 5 min) |
+| `CURSOR_PROXY_API_KEY` | *(none)* | API key for standalone proxy auth |
 
-Setup is **idempotent** — runs on every gateway start and never duplicates existing configuration.
+</details>
 
 ## CLI Commands
 
-| Command                                   | Description                                                 |
-| ----------------------------------------- | ----------------------------------------------------------- |
-| `openclaw cursor-brain setup`            | Re-run configuration (writes mcp.json + CLI backend)        |
-| `openclaw cursor-brain doctor`           | Health check all components                                 |
-| `openclaw cursor-brain status`           | Show current configuration details                          |
-| `openclaw cursor-brain upgrade <source>` | One-command upgrade (cleanup → uninstall → install)         |
-| `openclaw cursor-brain uninstall`        | One-command full uninstall (cleanup configs + remove files) |
+| Command | Description |
+|---|---|
+| `openclaw cursor-brain setup` | Configure MCP + interactive model selection |
+| `openclaw cursor-brain doctor` | Health check (10+ items) |
+| `openclaw cursor-brain status` | Show versions, config, models & tool count |
+| `openclaw cursor-brain upgrade <source>` | One-command upgrade + model selection |
+| `openclaw cursor-brain uninstall` | Full uninstall (configs + files) |
+| `openclaw cursor-brain proxy` | Show proxy status (PID, port, sessions) |
+| `openclaw cursor-brain proxy stop` | Stop the streaming proxy |
+| `openclaw cursor-brain proxy restart` | Restart proxy (detached) |
+| `openclaw cursor-brain proxy log [-n N]` | Show last N lines of proxy log (default 30) |
 
-### Upgrade
+## Standalone Streaming Proxy
+
+The proxy works without OpenClaw, turning any Cursor into an OpenAI-compatible API:
 
 ```bash
-openclaw cursor-brain upgrade ./openclaw-cursor-brain-2.0.0.tgz
-openclaw gateway restart
+node mcp-server/streaming-proxy.mjs
+# with options:
+CURSOR_PROXY_PORT=8080 CURSOR_PROXY_API_KEY=secret node mcp-server/streaming-proxy.mjs
 ```
-
-### Uninstall
 
 ```bash
-openclaw cursor-brain uninstall
-openclaw gateway restart
+curl http://127.0.0.1:18790/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"auto","stream":true,"messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
-This performs a complete teardown:
+Endpoints: `POST /v1/chat/completions`, `GET /v1/models`, `GET /v1/health`. Supports API key auth, CORS, and session reuse.
 
-1. Removes the plugin config entry (`openclaw plugins uninstall`, auto-confirmed)
-2. Deletes the plugin directory `~/.openclaw/extensions/openclaw-cursor-brain`
-3. Cleans up all custom configuration (see table below)
-4. Prompts you to restart the gateway
-
-| Location                                      | What's removed                      |
-| --------------------------------------------- | ----------------------------------- |
-| `~/.cursor/mcp.json`                          | `openclaw-gateway` MCP server entry |
-| `openclaw.json` `agents.defaults.cliBackends` | `cursor-cli` backend config         |
-| `openclaw.json` `agents.defaults.model`       | `cursor-cli/*` model references     |
-| `openclaw.json` `plugins.entries`             | `openclaw-cursor-brain` registration |
-
-> **Warning:** Do not run `openclaw plugins uninstall openclaw-cursor-brain` directly — it only removes the config entry, not the custom configuration above. If you did this by mistake, manually edit `~/.cursor/mcp.json` and `~/.openclaw/openclaw.json` to remove the leftover entries.
-
-## Auto-configured Files
+<details>
+<summary><strong>Auto-configured files</strong></summary>
 
 ### ~/.cursor/mcp.json
 
@@ -162,116 +171,81 @@ This performs a complete teardown:
   "mcpServers": {
     "openclaw-gateway": {
       "command": "node",
-      "args": ["<plugin-install-path>/mcp-server/server.mjs"],
+      "args": ["<plugin-path>/mcp-server/server.mjs"],
       "env": {
         "OPENCLAW_GATEWAY_URL": "http://127.0.0.1:<port>",
-        "OPENCLAW_GATEWAY_TOKEN": "<token>",
-        "OPENCLAW_CONFIG_PATH": "~/.openclaw/openclaw.json"
+        "OPENCLAW_GATEWAY_TOKEN": "<token>"
       }
     }
   }
 }
 ```
 
-### openclaw.json agents.defaults
+### openclaw.json (after interactive selection)
 
 ```json
 {
-  "model": {
-    "primary": "cursor-cli/auto",
-    "fallbacks": ["cursor-cli/sonnet-4.6"]
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "cursor-local/auto",
+        "fallbacks": ["cursor-local/opus-4.6", "cursor-local/sonnet-4.6", "..."]
+      }
+    }
   },
-  "cliBackends": {
-    "cursor-cli": {
-      "command": "/bin/bash",
-      "args": [
-        "-c",
-        "export SHELL=/bin/bash && cd <workspace> && exec <cursorPath> \"$@\"",
-        "_",
-        "-p",
-        "--output-format",
-        "json",
-        "--trust",
-        "--approve-mcps",
-        "--force"
-      ],
-      "output": "json",
-      "input": "arg",
-      "modelArg": "--model",
-      "sessionArg": "--resume",
-      "sessionMode": "existing"
+  "models": {
+    "providers": {
+      "cursor-local": {
+        "api": "openai-completions",
+        "baseUrl": "http://127.0.0.1:18790/v1",
+        "apiKey": "local",
+        "models": [
+          {"id": "auto", "name": "Auto"},
+          {"id": "opus-4.6", "name": "Claude 4.6 Opus"},
+          "..."
+        ]
+      }
     }
   }
 }
 ```
 
-## Cross-platform Support
+</details>
 
-| Platform | Cursor CLI detection                                                      | Shell       | mcp.json location                |
-| -------- | ------------------------------------------------------------------------- | ----------- | -------------------------------- |
-| macOS    | `~/.local/bin/agent`, `/usr/local/bin/agent`, `~/.cursor/bin/agent`       | `/bin/bash` | `~/.cursor/mcp.json`             |
-| Linux    | Same as macOS                                                             | `/bin/bash` | `~/.cursor/mcp.json`             |
-| Windows  | `%LOCALAPPDATA%\Programs\cursor\...\agent.exe`, `~\.cursor\bin\agent.exe` | `cmd.exe`   | `%USERPROFILE%\.cursor\mcp.json` |
+<details>
+<summary><strong>Troubleshooting</strong></summary>
 
-## MCP Server Tools
+| Problem | Fix |
+|---|---|
+| "Cursor Agent CLI not found" | Install Cursor and launch once, or set `config.cursorPath` |
+| Gateway error | Confirm gateway running (`openclaw gateway status`), check token |
+| Tools not appearing | Restart gateway, call `openclaw_discover` in Cursor |
+| Tool timeout | Set `OPENCLAW_TOOL_TIMEOUT_MS=120000` |
+| Proxy not starting | `openclaw cursor-brain proxy log` to check; `proxy restart` to force start |
+| Context lost after restart | Sessions auto-persist to disk; use `proxy restart` (not `gateway restart`) to keep sessions |
+| Debug MCP server | `OPENCLAW_GATEWAY_URL=... node mcp-server/server.mjs` |
 
-The MCP Server auto-discovers and registers all OpenClaw plugin tools at startup. Two built-in tools are always available:
+</details>
 
-| Tool                | Description                                           |
-| ------------------- | ----------------------------------------------------- |
-| `openclaw_invoke`   | Universal invoker — call any Gateway tool by name     |
-| `openclaw_discover` | Discovery — list all available tools with live status |
-
-### Tool Discovery Mechanism
-
-No regex, no log parsing — fully structured:
-
-1. Parse `openclaw.json` to get installed plugin paths
-2. Scan each plugin's `src/*.ts` for `name: "tool_name"` declarations
-3. Verify each candidate via Gateway REST API probe
-4. Register only verified tools with generic MCP schemas
-
-## Troubleshooting
-
-**`doctor` reports "Cursor Agent CLI not found"**
-
-- Ensure Cursor is installed and has been launched at least once (to generate the `agent` binary)
-- Or set the path explicitly: `config.cursorPath = "/path/to/agent"`
-
-**Tool calls return "Gateway error"**
-
-- Confirm the gateway is running: `openclaw gateway status`
-- Check that tokens match between `~/.cursor/mcp.json` and `openclaw.json`
-
-**Newly installed plugin tools don't appear**
-
-- Restart the gateway to trigger tool registration
-- Call `openclaw_discover` to check live tool availability
-- Use `openclaw_invoke` to call any tool directly by name
-
-## Project Structure
+<details>
+<summary><strong>Project structure</strong></summary>
 
 ```
-cursor-brain/
-  package.json              # Dependencies & metadata
-  openclaw.plugin.json      # OpenClaw plugin manifest
+openclaw-cursor-brain/
   index.ts                  # Plugin entry (register + CLI commands)
+  openclaw.plugin.json      # Plugin metadata + config schema
   src/
-    constants.ts            # Cross-platform path constants
-    setup.ts                # Idempotent setup logic
-    doctor.ts               # Health checks
-    cleanup.ts              # Uninstall cleanup logic
+    constants.ts            # Paths, IDs, output format types
+    setup.ts                # Idempotent setup, model discovery, format detection
+    doctor.ts               # Health checks (11 items)
+    cleanup.ts              # Uninstall cleanup
   mcp-server/
-    server.mjs              # MCP server (JSON parsing + REST probing)
-  skills/
-    cursor-brain/
-      SKILL.md              # Agent skill description
+    server.mjs              # MCP server (tool discovery, timeout/retry)
+    streaming-proxy.mjs     # OpenAI-compatible streaming proxy
 ```
 
-## Contributing
-
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup and guidelines.
+</details>
 
 ## License
 
-[MIT](./LICENSE) — use it, fork it, improve it.
+[MIT](./LICENSE)

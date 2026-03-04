@@ -1,51 +1,96 @@
 #!/usr/bin/env node
 
 // OpenClaw Gateway MCP Server
-// Discovers plugin tools from openclaw.json + REST API probing (no log regex).
-// Spawned automatically by cursor-cli via ~/.cursor/mcp.json.
+// Discovers plugin tools from openclaw.json + REST API probing.
+// Spawned automatically via ~/.cursor/mcp.json.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { readFileSync, existsSync, readdirSync } from "fs";
-import { join } from "path";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 import { homedir } from "os";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const GATEWAY_URL = process.env.OPENCLAW_GATEWAY_URL || "http://127.0.0.1:18789";
 const GATEWAY_TOKEN = process.env.OPENCLAW_GATEWAY_TOKEN || "";
 const CONFIG_PATH = process.env.OPENCLAW_CONFIG_PATH || join(homedir(), ".openclaw", "openclaw.json");
 
-// ── Gateway REST API caller ─────────────────────────────────────────────────
+const TOOL_TIMEOUT_MS = parseInt(process.env.OPENCLAW_TOOL_TIMEOUT_MS || "60000", 10);
+const TOOL_RETRY_COUNT = parseInt(process.env.OPENCLAW_TOOL_RETRY_COUNT || "2", 10);
+const TOOL_RETRY_DELAY_MS = 1000;
 
-async function invokeGatewayTool(tool, args) {
-  const resp = await fetch(`${GATEWAY_URL}/tools/invoke`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${GATEWAY_TOKEN}`,
-    },
-    body: JSON.stringify({ tool, args }),
-  });
-  const data = await resp.json();
-  if (!data.ok) {
-    throw new Error(data.error?.message || `Gateway error for tool "${tool}"`);
-  }
-  return (
-    data.result?.content?.[0]?.text ||
-    JSON.stringify(data.result?.details || data.result)
-  );
+function log(level, msg) {
+  process.stderr.write(`[openclaw-mcp] [${level}] ${msg}\n`);
 }
 
-async function probeToolExists(name) {
+function readPackageVersion() {
   try {
-    const resp = await fetch(`${GATEWAY_URL}/tools/invoke`, {
+    const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf-8"));
+    return pkg.version || "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+// ── Gateway REST API caller ─────────────────────────────────────────────────
+
+async function gatewayFetch(body, timeoutMs = TOOL_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(`${GATEWAY_URL}/tools/invoke`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${GATEWAY_TOKEN}`,
       },
-      body: JSON.stringify({ tool: name, args: {} }),
+      body: JSON.stringify(body),
+      signal: controller.signal,
     });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function isRetryable(err) {
+  if (err?.name === "AbortError") return true;
+  if (err?.cause?.code === "ECONNREFUSED") return true;
+  if (err?.cause?.code === "ECONNRESET") return true;
+  return false;
+}
+
+async function invokeGatewayTool(tool, args) {
+  let lastError;
+  for (let attempt = 0; attempt <= TOOL_RETRY_COUNT; attempt++) {
+    try {
+      const resp = await gatewayFetch({ tool, args });
+      const data = await resp.json();
+      if (!data.ok) {
+        throw new Error(data.error?.message || `Gateway error for tool "${tool}"`);
+      }
+      return (
+        data.result?.content?.[0]?.text ||
+        JSON.stringify(data.result?.details || data.result)
+      );
+    } catch (err) {
+      lastError = err;
+      if (attempt < TOOL_RETRY_COUNT && isRetryable(err)) {
+        log("warn", `Tool "${tool}" attempt ${attempt + 1} failed (${err.message}), retrying...`);
+        await new Promise((r) => setTimeout(r, TOOL_RETRY_DELAY_MS * (attempt + 1)));
+        continue;
+      }
+      break;
+    }
+  }
+  throw lastError;
+}
+
+async function probeToolExists(name) {
+  try {
+    const resp = await gatewayFetch({ tool: name, args: {} }, 5000);
     const data = await resp.json();
     return data.ok || data.error?.type !== "not_found";
   } catch {
@@ -53,10 +98,31 @@ async function probeToolExists(name) {
   }
 }
 
+// ── Gateway tool metadata ───────────────────────────────────────────────────
+
+async function fetchToolDescriptions() {
+  try {
+    const resp = await fetch(`${GATEWAY_URL}/tools`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${GATEWAY_TOKEN}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!resp.ok) return {};
+    const data = await resp.json();
+    const map = {};
+    const tools = data.tools || data.result || data;
+    if (Array.isArray(tools)) {
+      for (const t of tools) {
+        if (t.name) map[t.name] = { description: t.description || "", parameters: t.parameters || null };
+      }
+    }
+    return map;
+  } catch {
+    return {};
+  }
+}
+
 // ── Structured tool discovery ───────────────────────────────────────────────
-// 1. Parse openclaw.json (JSON) → installed plugin paths
-// 2. Scan plugin source files for `name: "tool_name"` declarations
-// 3. Verify each candidate via REST API probe
 
 function readOpenClawConfig() {
   try {
@@ -73,17 +139,8 @@ function extractToolNamesFromSource(filePath) {
     for (const line of content.split("\n")) {
       const trimmed = line.trim();
       if (!trimmed.startsWith("name:") && !trimmed.startsWith('"name"')) continue;
-      const qSingle = trimmed.indexOf("'");
-      const qDouble = trimmed.indexOf('"', trimmed.indexOf(":"));
-      const qStart = qSingle >= 0 && (qDouble < 0 || qSingle < qDouble) ? qSingle : qDouble;
-      if (qStart < 0) continue;
-      const quote = trimmed[qStart];
-      const qEnd = trimmed.indexOf(quote, qStart + 1);
-      if (qEnd < 0) continue;
-      const value = trimmed.slice(qStart + 1, qEnd);
-      if (/^[a-zA-Z_]\w*$/.test(value) && value.length > 2) {
-        names.push(value);
-      }
+      const match = trimmed.match(/^(?:name|"name")\s*:\s*['"]([a-zA-Z_]\w{2,})['"]/);
+      if (match) names.push(match[1]);
     }
     return names;
   } catch {
@@ -125,33 +182,49 @@ function discoverCandidateToolNames() {
 
 async function discoverVerifiedTools() {
   const candidates = discoverCandidateToolNames();
-  const verified = [];
-  for (const name of candidates) {
-    if (await probeToolExists(name)) {
-      verified.push(name);
-    }
-  }
-  return verified;
+  const results = await Promise.allSettled(
+    candidates.map(async (name) => {
+      const exists = await probeToolExists(name);
+      return { name, exists };
+    }),
+  );
+  return results
+    .filter((r) => r.status === "fulfilled" && r.value.exists)
+    .map((r) => r.value.name);
 }
 
 // ── Build MCP server ────────────────────────────────────────────────────────
 
-const server = new McpServer({ name: "openclaw-gateway", version: "2.0.0" });
+const VERSION = readPackageVersion();
+const server = new McpServer({ name: "openclaw-gateway", version: VERSION });
 
 const registeredNames = new Set();
 
-// Discover tools at startup: candidates from config + source scan, then REST probe
+log("info", `Starting openclaw-gateway MCP server v${VERSION}`);
+log("info", `Gateway: ${GATEWAY_URL}`);
+
 let startupTools = [];
+let toolMeta = {};
+
 try {
-  startupTools = await discoverVerifiedTools();
-} catch {
-  startupTools = [];
+  const [tools, meta] = await Promise.all([
+    discoverVerifiedTools(),
+    fetchToolDescriptions(),
+  ]);
+  startupTools = tools;
+  toolMeta = meta;
+  log("info", `Discovered ${startupTools.length} tools: ${startupTools.join(", ") || "(none)"}`);
+} catch (err) {
+  log("error", `Tool discovery failed: ${err.message}`);
 }
 
 for (const name of startupTools) {
+  const meta = toolMeta[name];
+  const description = meta?.description || `OpenClaw plugin tool: ${name}. Call openclaw_discover for details.`;
+
   server.tool(
     name,
-    `OpenClaw plugin tool: ${name}. Call openclaw_discover for details.`,
+    description,
     {
       action: z.string().optional().describe("Action to perform"),
       args_json: z.string().optional().describe("Additional arguments as JSON string"),
@@ -162,14 +235,18 @@ for (const name of startupTools) {
       if (params.args_json) {
         try { Object.assign(args, JSON.parse(params.args_json)); } catch { /* ignore */ }
       }
-      const text = await invokeGatewayTool(name, args);
-      return { content: [{ type: "text", text }] };
+      try {
+        const text = await invokeGatewayTool(name, args);
+        return { content: [{ type: "text", text }] };
+      } catch (err) {
+        log("error", `Tool "${name}" failed: ${err.message}`);
+        return { content: [{ type: "text", text: `Error: ${err.message}` }], isError: true };
+      }
     },
   );
   registeredNames.add(name);
 }
 
-// Universal tool invoker — works for any Gateway tool by name
 server.tool(
   "openclaw_invoke",
   "Call any OpenClaw Gateway tool by name. Use for tools not listed directly, or newly installed plugins.",
@@ -184,26 +261,31 @@ server.tool(
     if (params.args_json) {
       try { Object.assign(args, JSON.parse(params.args_json)); } catch { /* ignore */ }
     }
-    const text = await invokeGatewayTool(params.tool, args);
-    return { content: [{ type: "text", text }] };
+    try {
+      const text = await invokeGatewayTool(params.tool, args);
+      return { content: [{ type: "text", text }] };
+    } catch (err) {
+      log("error", `openclaw_invoke("${params.tool}") failed: ${err.message}`);
+      return { content: [{ type: "text", text: `Error: ${err.message}` }], isError: true };
+    }
   },
 );
 
-// Runtime discovery — let the agent ask what tools are available
 server.tool(
   "openclaw_discover",
   "Discover all available OpenClaw Gateway tools with live availability check.",
   {},
   async () => {
     const candidates = discoverCandidateToolNames();
+    const results = await Promise.allSettled(
+      candidates.map(async (n) => ({ name: n, ok: await probeToolExists(n) })),
+    );
+
     const available = [];
     const unavailable = [];
-
-    for (const n of candidates) {
-      if (await probeToolExists(n)) {
-        available.push(n);
-      } else {
-        unavailable.push(n);
+    for (const r of results) {
+      if (r.status === "fulfilled") {
+        (r.value.ok ? available : unavailable).push(r.value.name);
       }
     }
 
@@ -225,3 +307,4 @@ server.tool(
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
+log("info", "MCP server connected via stdio");

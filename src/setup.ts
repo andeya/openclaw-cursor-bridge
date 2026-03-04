@@ -7,10 +7,8 @@ import {
   getCursorSearchPaths,
   getWhichCommand,
   MCP_SERVER_ID,
-  CLI_BACKEND_ID,
-  CLI_BACKEND_COMMON,
   OPENCLAW_CONFIG_PATH,
-  buildShellArgs,
+  type OutputFormat,
 } from "./constants.js";
 
 export type SetupContext = {
@@ -22,10 +20,18 @@ export type SetupContext = {
   logger: PluginLogger;
 };
 
+export type CursorModel = {
+  id: string;
+  name: string;
+  reasoning: boolean;
+  isDefault: boolean;
+};
+
 export type SetupResult = {
   cursorPath: string | null;
+  outputFormat: OutputFormat;
   mcpConfigured: boolean;
-  cliBackendConfigured: boolean;
+  cursorModels: CursorModel[];
   errors: string[];
   warnings: string[];
 };
@@ -43,6 +49,68 @@ export function detectCursorPath(overridePath?: string): string | null {
     if (existsSync(p)) return p;
   }
   return null;
+}
+
+function cursorSupportsStreamJson(cursorPath: string): boolean {
+  try {
+    const output = execSync(`"${cursorPath}" --help`, {
+      encoding: "utf-8",
+      timeout: 10000,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return output.includes("stream-json");
+  } catch (e: any) {
+    const combined = (e.stdout || "") + (e.stderr || "");
+    return combined.includes("stream-json");
+  }
+}
+
+export function discoverCursorModels(cursorPath: string, logger?: PluginLogger): CursorModel[] {
+  try {
+    const output = execSync(`"${cursorPath}" --list-models`, {
+      encoding: "utf-8",
+      timeout: 15000,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const models: CursorModel[] = [];
+    for (const line of output.split("\n")) {
+      const match = line.match(/^(\S+)\s+-\s+(.+?)(?:\s+\((current|default)\))?$/);
+      if (!match) continue;
+      const [, id, rawName, annotation] = match;
+      const name = rawName.trim();
+      models.push({
+        id,
+        name,
+        reasoning: id.includes("thinking"),
+        isDefault: annotation === "default",
+      });
+    }
+    logger?.info(`Discovered ${models.length} cursor-agent models`);
+    return models;
+  } catch (e: any) {
+    logger?.warn(`Could not list cursor-agent models: ${e.message}`);
+    return [];
+  }
+}
+
+export function detectOutputFormat(
+  cursorPath: string,
+  userOverride?: string,
+  logger?: PluginLogger,
+): OutputFormat {
+  if (userOverride === "stream-json" || userOverride === "json") {
+    logger?.info(`Output format: "${userOverride}" (explicit config)`);
+    return userOverride;
+  }
+
+  const cursorOk = cursorSupportsStreamJson(cursorPath);
+  if (!cursorOk) {
+    logger?.info(`Output format: "json" (cursor-agent does not advertise stream-json)`);
+    return "json";
+  }
+
+  logger?.info(`Output format: "stream-json" (cursor-agent supports it)`);
+  return "stream-json";
 }
 
 export function configureMcpJson(ctx: SetupContext): boolean {
@@ -94,16 +162,12 @@ export function configureMcpJson(ctx: SetupContext): boolean {
   return true;
 }
 
-export function buildCliBackendConfig(cursorPath: string, workspaceDir: string) {
-  const shell = buildShellArgs(cursorPath, workspaceDir);
-  return { ...CLI_BACKEND_COMMON, ...shell };
-}
-
 export function runSetup(ctx: SetupContext): SetupResult {
   const result: SetupResult = {
     cursorPath: null,
+    outputFormat: "json",
     mcpConfigured: false,
-    cliBackendConfigured: false,
+    cursorModels: [],
     errors: [],
     warnings: [],
   };
@@ -118,6 +182,14 @@ export function runSetup(ctx: SetupContext): SetupResult {
     return result;
   }
   ctx.logger.info(`Cursor Agent found at ${result.cursorPath}`);
+
+  result.outputFormat = detectOutputFormat(
+    result.cursorPath,
+    ctx.pluginConfig?.outputFormat as string | undefined,
+    ctx.logger,
+  );
+
+  result.cursorModels = discoverCursorModels(result.cursorPath, ctx.logger);
 
   result.mcpConfigured = configureMcpJson(ctx);
   if (!result.mcpConfigured) {

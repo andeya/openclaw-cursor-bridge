@@ -1,14 +1,71 @@
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, readdirSync } from "fs";
 import { join } from "path";
 import { execSync } from "child_process";
 import {
   getCursorMcpConfigPath,
   MCP_SERVER_ID,
+  PROVIDER_ID,
   OPENCLAW_CONFIG_PATH,
 } from "./constants.js";
-import { detectCursorPath } from "./setup.js";
+import { detectCursorPath, detectOutputFormat } from "./setup.js";
 
 export type CheckResult = { ok: boolean; label: string; detail: string };
+
+function getCursorVersion(cursorPath: string): string | null {
+  try {
+    const output = execSync(`"${cursorPath}" --version`, {
+      encoding: "utf-8",
+      timeout: 10000,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return output.trim().split("\n")[0]?.trim() || null;
+  } catch (e: any) {
+    const combined = ((e.stdout || "") + (e.stderr || "")).trim();
+    return combined.split("\n")[0]?.trim() || null;
+  }
+}
+
+function getPluginVersion(pluginDir: string): string | null {
+  try {
+    const pkg = JSON.parse(readFileSync(join(pluginDir, "package.json"), "utf-8"));
+    return pkg.version || null;
+  } catch {
+    return null;
+  }
+}
+
+export function countDiscoveredTools(): number | null {
+  try {
+    const config = JSON.parse(readFileSync(OPENCLAW_CONFIG_PATH, "utf-8"));
+    const installs = config.plugins?.installs || {};
+    const names = new Set<string>();
+
+    for (const [, info] of Object.entries(installs)) {
+      const installPath = (info as any).installPath;
+      if (!installPath || !existsSync(installPath)) continue;
+      const srcDir = join(installPath, "src");
+      if (!existsSync(srcDir)) continue;
+
+      const files = readdirSync(srcDir).filter(
+        (f: string) => f.endsWith(".ts") && !f.includes(".test.") && !f.includes(".d.ts"),
+      );
+      for (const file of files) {
+        try {
+          const content = readFileSync(join(srcDir, file), "utf-8");
+          for (const line of content.split("\n")) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith("name:") && !trimmed.startsWith('"name"')) continue;
+            const match = trimmed.match(/^(?:name|"name")\s*:\s*['"]([a-zA-Z_]\w{2,})['"]/);
+            if (match) names.add(match[1]);
+          }
+        } catch { /* skip */ }
+      }
+    }
+    return names.size;
+  } catch {
+    return null;
+  }
+}
 
 export function runDoctorChecks(opts: {
   gatewayPort: number;
@@ -18,6 +75,15 @@ export function runDoctorChecks(opts: {
 }): CheckResult[] {
   const checks: CheckResult[] = [];
 
+  // Plugin version
+  const pluginVersion = getPluginVersion(opts.pluginDir);
+  checks.push(
+    pluginVersion
+      ? { ok: true, label: "Plugin version", detail: `v${pluginVersion}` }
+      : { ok: true, label: "Plugin version", detail: "unknown" },
+  );
+
+  // Cursor Agent CLI
   const cursorPath = detectCursorPath(opts.cursorPathOverride);
   checks.push(
     cursorPath
@@ -25,6 +91,17 @@ export function runDoctorChecks(opts: {
       : { ok: false, label: "Cursor Agent CLI", detail: "Not found. Install from https://cursor.sh" },
   );
 
+  // Cursor agent version
+  if (cursorPath) {
+    const version = getCursorVersion(cursorPath);
+    checks.push(
+      version
+        ? { ok: true, label: "Cursor Agent version", detail: version }
+        : { ok: true, label: "Cursor Agent version", detail: "unknown (--version not supported)" },
+    );
+  }
+
+  // MCP server file
   const mcpServerPath = join(opts.pluginDir, "mcp-server", "server.mjs");
   checks.push(
     existsSync(mcpServerPath)
@@ -32,6 +109,7 @@ export function runDoctorChecks(opts: {
       : { ok: false, label: "MCP server file", detail: `Missing: ${mcpServerPath}` },
   );
 
+  // MCP SDK dependency
   const sdkPath = join(opts.pluginDir, "node_modules", "@modelcontextprotocol", "sdk");
   checks.push(
     existsSync(sdkPath)
@@ -39,6 +117,7 @@ export function runDoctorChecks(opts: {
       : { ok: false, label: "MCP SDK dependency", detail: `Missing: run npm install in ${opts.pluginDir}` },
   );
 
+  // Cursor mcp.json
   const mcpConfigPath = getCursorMcpConfigPath();
   try {
     if (existsSync(mcpConfigPath)) {
@@ -56,12 +135,49 @@ export function runDoctorChecks(opts: {
     checks.push({ ok: false, label: "Cursor mcp.json", detail: `Parse error: ${e.message}` });
   }
 
+  // OpenClaw config
   checks.push(
     existsSync(OPENCLAW_CONFIG_PATH)
       ? { ok: true, label: "OpenClaw config", detail: OPENCLAW_CONFIG_PATH }
       : { ok: false, label: "OpenClaw config", detail: `Missing: ${OPENCLAW_CONFIG_PATH}` },
   );
 
+  // Streaming proxy provider configured
+  if (existsSync(OPENCLAW_CONFIG_PATH)) {
+    try {
+      const cfg = JSON.parse(readFileSync(OPENCLAW_CONFIG_PATH, "utf-8"));
+      const provider = cfg?.models?.providers?.[PROVIDER_ID];
+      checks.push(
+        provider
+          ? { ok: true, label: "Streaming provider", detail: `"${PROVIDER_ID}" configured (${provider.baseUrl || "unknown"})` }
+          : { ok: false, label: "Streaming provider", detail: `"${PROVIDER_ID}" not found in openclaw.json` },
+      );
+    } catch {
+      checks.push({ ok: false, label: "Streaming provider", detail: "Could not parse openclaw.json" });
+    }
+  }
+
+  // Output format detection
+  if (cursorPath) {
+    const detected = detectOutputFormat(cursorPath);
+    checks.push({
+      ok: true,
+      label: "Output format (detected)",
+      detail: `"${detected}"${detected === "stream-json" ? " (streaming + thinking)" : " (batch)"}`,
+    });
+  }
+
+  // Discovered tools count
+  const toolCount = countDiscoveredTools();
+  if (toolCount !== null) {
+    checks.push({
+      ok: toolCount > 0,
+      label: "Discovered tool candidates",
+      detail: toolCount > 0 ? `${toolCount} tools found in plugin sources` : "No tools found (are plugins installed?)",
+    });
+  }
+
+  // Gateway connectivity
   checks.push(createGatewayCheck(opts.gatewayPort, opts.gatewayToken));
 
   return checks;
@@ -114,8 +230,9 @@ export function formatDoctorResults(checks: CheckResult[]): string {
     lines.push(`  ${icon} ${c.label}: ${c.detail}`);
   }
   const passed = checks.filter((c) => c.ok).length;
-  lines.push("", `${passed}/${checks.length} checks passed`);
-  if (passed < checks.length) {
+  const total = checks.length;
+  lines.push("", `${passed}/${total} checks passed`);
+  if (passed < total) {
     lines.push("Run `openclaw cursor-brain setup` to fix configuration issues.");
   }
   return lines.join("\n");

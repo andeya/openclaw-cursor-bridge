@@ -1,9 +1,9 @@
 import { existsSync, readFileSync, writeFileSync } from "fs";
-import { getCursorMcpConfigPath, MCP_SERVER_ID, CLI_BACKEND_ID, OPENCLAW_CONFIG_PATH } from "./constants.js";
+import { getCursorMcpConfigPath, MCP_SERVER_ID, PROVIDER_ID, OPENCLAW_CONFIG_PATH } from "./constants.js";
 
 export type CleanupResult = {
   mcpRemoved: boolean;
-  cliBackendRemoved: boolean;
+  providerRemoved: boolean;
   modelReset: boolean;
   errors: string[];
 };
@@ -26,39 +26,32 @@ function cleanupMcpJson(): { removed: boolean; error?: string } {
 }
 
 function cleanupOpenClawConfigFile(): {
-  cliBackendRemoved: boolean;
+  providerRemoved: boolean;
   modelReset: boolean;
   error?: string;
 } {
   try {
     if (!existsSync(OPENCLAW_CONFIG_PATH)) {
-      return { cliBackendRemoved: false, modelReset: false };
+      return { providerRemoved: false, modelReset: false };
     }
 
     const raw = JSON.parse(readFileSync(OPENCLAW_CONFIG_PATH, "utf-8"));
-    const defaults = raw?.agents?.defaults;
-    if (!defaults) return { cliBackendRemoved: false, modelReset: false };
-
     let changed = false;
-    let cliBackendRemoved = false;
+    let providerRemoved = false;
     let modelReset = false;
 
-    if (defaults.cliBackends?.[CLI_BACKEND_ID]) {
-      delete defaults.cliBackends[CLI_BACKEND_ID];
-      if (!Object.keys(defaults.cliBackends).length) delete defaults.cliBackends;
-      cliBackendRemoved = true;
-      changed = true;
-    }
+    const defaults = raw?.agents?.defaults;
+    const prefix = `${PROVIDER_ID}/`;
 
-    if (defaults.model) {
-      if ((defaults.model.primary as string)?.startsWith(`${CLI_BACKEND_ID}/`)) {
+    if (defaults?.model) {
+      if ((defaults.model.primary as string)?.startsWith(prefix)) {
         delete defaults.model.primary;
         modelReset = true;
         changed = true;
       }
       if (defaults.model.fallbacks) {
         const cleaned = defaults.model.fallbacks.filter(
-          (f: string) => !f.startsWith(`${CLI_BACKEND_ID}/`)
+          (f: string) => !f.startsWith(prefix),
         );
         if (cleaned.length !== defaults.model.fallbacks.length) {
           defaults.model.fallbacks = cleaned.length ? cleaned : undefined;
@@ -71,20 +64,27 @@ function cleanupOpenClawConfigFile(): {
       }
     }
 
+    if (raw.models?.providers?.[PROVIDER_ID]) {
+      delete raw.models.providers[PROVIDER_ID];
+      if (!Object.keys(raw.models.providers).length) delete raw.models.providers;
+      providerRemoved = true;
+      changed = true;
+    }
+
     if (changed) {
       writeFileSync(OPENCLAW_CONFIG_PATH, JSON.stringify(raw, null, 2) + "\n");
     }
 
-    return { cliBackendRemoved, modelReset };
+    return { providerRemoved, modelReset };
   } catch (e: any) {
-    return { cliBackendRemoved: false, modelReset: false, error: e.message };
+    return { providerRemoved: false, modelReset: false, error: e.message };
   }
 }
 
 export function runCleanup(): CleanupResult {
   const result: CleanupResult = {
     mcpRemoved: false,
-    cliBackendRemoved: false,
+    providerRemoved: false,
     modelReset: false,
     errors: [],
   };
@@ -94,7 +94,7 @@ export function runCleanup(): CleanupResult {
   if (mcpResult.error) result.errors.push(`MCP cleanup: ${mcpResult.error}`);
 
   const configResult = cleanupOpenClawConfigFile();
-  result.cliBackendRemoved = configResult.cliBackendRemoved;
+  result.providerRemoved = configResult.providerRemoved;
   result.modelReset = configResult.modelReset;
   if (configResult.error) result.errors.push(`Config cleanup: ${configResult.error}`);
 

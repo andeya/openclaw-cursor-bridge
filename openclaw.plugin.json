@@ -13,13 +13,25 @@
       },
       "model": {
         "type": "string",
-        "default": "auto",
-        "description": "Primary Cursor model (used as cursor-cli/<model>)."
+        "description": "Primary model (cursor-local/<model>). Usually selected interactively via 'setup' or 'upgrade'. Override here to skip interactive selection."
       },
       "fallbackModel": {
         "type": "string",
-        "default": "sonnet-4.6",
-        "description": "Fallback model when primary is unavailable."
+        "description": "Fallback model. Usually selected interactively via 'setup' or 'upgrade'. Override here to skip interactive selection."
+      },
+      "outputFormat": {
+        "type": "string",
+        "enum": ["stream-json", "json"],
+        "description": "Output format for cursor-agent. Auto-detected if not set. Use 'stream-json' for streaming + thinking blocks, 'json' for batch."
+      },
+      "proxyPort": {
+        "type": "number",
+        "default": 18790,
+        "description": "Port for the local streaming proxy (OpenAI-compatible). Default 18790."
+      },
+      "cursorModel": {
+        "type": "string",
+        "description": "Cursor agent model override (e.g. 'sonnet-4.6', 'opus-4.6'). Leave empty for 'auto'. Append '-thinking' for extended thinking (e.g. 'sonnet-4.6-thinking')."
       }
     }
   }

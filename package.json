@@ -1,6 +1,6 @@
 {
   "name": "openclaw-cursor-brain",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Use Cursor as the AI brain for OpenClaw — connects all plugin tools via MCP with zero manual config.",
   "type": "module",
   "license": "MIT",
