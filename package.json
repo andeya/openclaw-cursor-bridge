@@ -4,14 +4,14 @@
   "description": "Use Cursor as the AI brain for OpenClaw — bridges all plugin tools via MCP with zero manual config.",
   "type": "module",
   "license": "MIT",
-  "author": "OpenClaw Contributors",
-  "homepage": "https://github.com/nicepkg/openclaw-cursor-bridge#readme",
+  "author": "andeya <andeyalee@outlook.com>",
+  "homepage": "https://github.com/andeya/openclaw-cursor-bridge#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/nicepkg/openclaw-cursor-bridge.git"
+    "url": "https://github.com/andeya/openclaw-cursor-bridge.git"
   },
   "bugs": {
-    "url": "https://github.com/nicepkg/openclaw-cursor-bridge/issues"
+    "url": "https://github.com/andeya/openclaw-cursor-bridge/issues"
   },
   "keywords": [
     "openclaw",
@@ -41,7 +41,9 @@
     "zod": "^3.24.0"
   },
   "openclaw": {
-    "extensions": ["./index.ts"],
+    "extensions": [
+      "./index.ts"
+    ],
     "install": {
       "npmSpec": "openclaw-cursor-bridge",
       "localPath": "extensions/cursor-bridge",

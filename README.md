@@ -1,7 +1,7 @@
 <p align="center">
   <h1 align="center">openclaw-cursor-bridge</h1>
   <p align="center">
-    Use <a href="https://cursor.sh">Cursor</a> as the AI brain for <a href="https://github.com/nicepkg/openclaw">OpenClaw</a> — with full access to every plugin tool.
+    Use <a href="https://cursor.sh">Cursor</a> as the AI brain for <a href="https://github.com/openclaw/openclaw">OpenClaw</a> — with full access to every plugin tool.
   </p>
   <p align="center">
     <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
@@ -14,7 +14,7 @@
 
 ---
 
-**cursor-bridge** is an [OpenClaw](https://github.com/nicepkg/openclaw) plugin that turns [Cursor Agent CLI](https://cursor.sh) into a fully-integrated LLM backend. It bridges all OpenClaw plugin tools (Feishu, Slack, GitHub, custom plugins, etc.) to Cursor through the [Model Context Protocol (MCP)](https://modelcontextprotocol.io), so the AI can call them natively.
+**cursor-bridge** is an [OpenClaw](https://github.com/openclaw/openclaw) plugin that turns [Cursor Agent CLI](https://cursor.sh) into a fully-integrated LLM backend. It bridges all OpenClaw plugin tools (Feishu, Slack, GitHub, custom plugins, etc.) to Cursor through the [Model Context Protocol (MCP)](https://modelcontextprotocol.io), so the AI can call them natively.
 
 **Zero manual config.** Install, restart, done.
 

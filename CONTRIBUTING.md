@@ -5,7 +5,7 @@ Thank you for your interest in contributing! Here's how to get started.
 ## Development Setup
 
 ```bash
-git clone https://github.com/nicepkg/openclaw-cursor-bridge.git
+git clone https://github.com/andeya/openclaw-cursor-bridge.git
 cd openclaw-cursor-bridge
 npm install
 ```
@@ -67,6 +67,7 @@ skills/
 ## Reporting Issues
 
 Please include:
+
 - Output of `openclaw cursor-bridge doctor`
 - Output of `openclaw cursor-bridge status`
 - Your OS and Node.js version

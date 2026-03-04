@@ -2,7 +2,7 @@
 
 [English](./README.md) | 中文
 
-将 [Cursor Agent CLI](https://cursor.sh) 作为 [OpenClaw](https://github.com/nicepkg/openclaw) 的 AI 大脑，通过 [MCP (Model Context Protocol)](https://modelcontextprotocol.io) 桥接 OpenClaw Gateway 中注册的所有插件工具，使 Cursor Agent 能直接调用飞书、Slack、GitHub 等第三方插件能力。
+将 [Cursor Agent CLI](https://cursor.sh) 作为 [OpenClaw](https://github.com/openclaw/openclaw) 的 AI 大脑，通过 [MCP (Model Context Protocol)](https://modelcontextprotocol.io) 桥接 OpenClaw Gateway 中注册的所有插件工具，使 Cursor Agent 能直接调用飞书、Slack、GitHub 等第三方插件能力。
 
 **零配置**——安装、重启，完事。
 
