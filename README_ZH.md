@@ -2,6 +2,9 @@
 
 [![npm version](https://img.shields.io/npm/v/openclaw-cursor-bridge.svg)](https://www.npmjs.com/package/openclaw-cursor-bridge)
 [![npm downloads](https://img.shields.io/npm/dm/openclaw-cursor-bridge.svg)](https://www.npmjs.com/package/openclaw-cursor-bridge)
+[![OpenClaw Plugin](https://img.shields.io/badge/OpenClaw-Plugin-orange.svg)](https://github.com/openclaw/openclaw)
+[![Cursor](https://img.shields.io/badge/Cursor-Agent%20CLI-purple.svg)](https://cursor.sh)
+[![Node.js >= 18](https://img.shields.io/badge/Node.js-%3E%3D18-green.svg)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 [English](./README.md) | 中文
