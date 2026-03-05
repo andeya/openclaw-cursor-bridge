@@ -12,6 +12,11 @@ import { runCleanup } from "./src/cleanup.js";
 import { PLUGIN_ID, PROVIDER_ID, DEFAULT_PROXY_PORT, OPENCLAW_CONFIG_PATH, getCursorMcpConfigPath, type OutputFormat } from "./src/constants.js";
 
 let proxyChild: ReturnType<typeof spawn> | null = null;
+let proxyRestartCount = 0;
+let lastProxyStartTime = 0;
+const MAX_PROXY_RESTARTS = 3;
+const PROXY_RESTART_DELAYS = [2000, 10000, 60000];
+const PROXY_STABLE_PERIOD = 300000;
 
 // @clack/prompts lives in openclaw's node_modules; follow the bin symlink to resolve
 let _clack: any;
@@ -75,6 +80,20 @@ function readPackageVersion(dir: string): string {
   } catch { return "unknown"; }
 }
 
+/** Returns 1 if a > b, -1 if a < b, 0 if equal. Non-semver strings compare as equal. */
+function compareSemver(a: string, b: string): number {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  if (pa.some(isNaN) || pb.some(isNaN)) return 0;
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const na = pa[i] ?? 0;
+    const nb = pb[i] ?? 0;
+    if (na > nb) return 1;
+    if (na < nb) return -1;
+  }
+  return 0;
+}
+
 function startProxy(opts: { pluginDir: string; cursorPath: string; workspaceDir: string; port: number; outputFormat: OutputFormat; cursorModel: string; logger: any }) {
   const proxyScript = join(opts.pluginDir, "mcp-server", "streaming-proxy.mjs");
   if (!existsSync(proxyScript)) return;
@@ -99,9 +118,26 @@ function startProxy(opts: { pluginDir: string; cursorPath: string; workspaceDir:
     stdio: "ignore",
   });
 
+  lastProxyStartTime = Date.now();
+
   proxyChild.on("exit", (code) => {
     opts.logger.info(`Streaming proxy exited (code ${code})`);
     proxyChild = null;
+
+    if (code === 0 || code === null) return;
+
+    const uptime = Date.now() - lastProxyStartTime;
+    if (uptime > PROXY_STABLE_PERIOD) proxyRestartCount = 0;
+
+    if (proxyRestartCount >= MAX_PROXY_RESTARTS) {
+      opts.logger.error(`Proxy crashed ${proxyRestartCount} times within cooldown, not restarting. Run: openclaw cursor-brain proxy restart`);
+      return;
+    }
+
+    const delay = PROXY_RESTART_DELAYS[Math.min(proxyRestartCount, PROXY_RESTART_DELAYS.length - 1)];
+    proxyRestartCount++;
+    opts.logger.warn(`Proxy crashed (code ${code}), restarting in ${delay / 1000}s (attempt ${proxyRestartCount}/${MAX_PROXY_RESTARTS})`);
+    setTimeout(() => startProxy(opts), delay);
   });
 
   opts.logger.info(`Streaming proxy started on port ${opts.port} (pid ${proxyChild.pid})`);
@@ -510,6 +546,23 @@ const plugin = {
             : `v${oldVersion} → ${source}`;
 
           clack.intro(`Cursor Brain Upgrade (${versionHint})`);
+
+          if (sourceVersion !== "unknown" && oldVersion !== "unknown") {
+            const cmp = compareSemver(sourceVersion, oldVersion);
+            if (cmp < 0) {
+              const ok = await clack.confirm({ message: `Target version v${sourceVersion} is older than current v${oldVersion}. Downgrade anyway?` });
+              if (ok !== true) {
+                clack.log.info("Upgrade cancelled");
+                return;
+              }
+            } else if (cmp === 0) {
+              const ok = await clack.confirm({ message: `Target version v${sourceVersion} is the same as current. Reinstall?` });
+              if (ok !== true) {
+                clack.log.info("Upgrade cancelled");
+                return;
+              }
+            }
+          }
 
           const s = clack.spinner();
           s.start("Removing old plugin...");

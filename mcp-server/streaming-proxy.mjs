@@ -36,6 +36,27 @@ const INSTANT_RESULT = process.env.CURSOR_PROXY_INSTANT_RESULT !== "false";
 const TARGET_CHARS_PER_SEC = parseInt(process.env.CURSOR_PROXY_STREAM_SPEED || "200", 10);
 const SHORT_TEXT_THRESHOLD = 100;
 const REQUEST_TIMEOUT_MS = parseInt(process.env.CURSOR_PROXY_REQUEST_TIMEOUT || "300000", 10); // 5 min default
+const MAX_CONSECUTIVE_FAILURES = parseInt(process.env.CURSOR_PROXY_MAX_CONSECUTIVE_FAILURES || "5", 10);
+
+// ── Request health tracking ─────────────────────────────────────────────────
+
+let consecutiveFailures = 0;
+let lastErrorTime = 0;
+let lastErrorMsg = "";
+
+function recordSuccess() {
+  consecutiveFailures = 0;
+}
+
+function recordFailure(stderrSnippet) {
+  consecutiveFailures++;
+  lastErrorTime = Date.now();
+  lastErrorMsg = stderrSnippet || "empty response";
+  if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+    log("error", `${consecutiveFailures} consecutive failures (last: ${lastErrorMsg}), self-exiting for restart`);
+    process.exit(2);
+  }
+}
 
 // ── Script identity ─────────────────────────────────────────────────────────
 
@@ -208,8 +229,8 @@ async function streamChunked(res, id, model, text) {
 
 // ── Spawn cursor-agent ──────────────────────────────────────────────────────
 
-function spawnCursorAgent(userMsg, sessionKey, requestModel) {
-  const cursorSessionId = sessionKey ? sessions.get(sessionKey) : null;
+function spawnCursorAgent(userMsg, sessionKey, requestModel, { skipSession = false } = {}) {
+  const cursorSessionId = !skipSession && sessionKey ? sessions.get(sessionKey) : null;
   const args = ["-p", "--output-format", OUTPUT_FORMAT, "--stream-partial-output", "--trust", "--approve-mcps", "--force"];
   const model = CURSOR_MODEL || mapRequestModel(requestModel);
   if (model) args.push("--model", model);
@@ -222,11 +243,12 @@ function spawnCursorAgent(userMsg, sessionKey, requestModel) {
   });
   child.stdin.write(userMsg);
   child.stdin.end();
-  let stderrBuf = "";
-  child.stderr.on("data", (d) => { stderrBuf += d; });
+  child._stderrBuf = "";
+  child.stderr.on("data", (d) => { child._stderrBuf += d; });
   child.stderr.on("close", () => {
-    if (stderrBuf.trim()) log("debug", `cursor-agent stderr: ${stderrBuf.trim().slice(0, 500)}`);
+    if (child._stderrBuf.trim()) log("debug", `cursor-agent stderr: ${child._stderrBuf.trim().slice(0, 500)}`);
   });
+  child._usedSession = !!cursorSessionId;
   return child;
 }
 
@@ -257,6 +279,91 @@ function extractSessionFromMeta(messages) {
   return null;
 }
 
+// ── Stream output processor (reusable for retry) ────────────────────────────
+
+function processStreamOutput(child, { requestId, model, sessionKey, res }) {
+  return new Promise((resolve) => {
+    let resolved = false;
+    let resultText = "";
+    let hasStreamedContent = false;
+    let error = null;
+    const toolCalls = new Map();
+
+    const done = () => {
+      if (resolved) return;
+      resolved = true;
+      resolve({ resultText, hasStreamedContent, error });
+    };
+
+    const rl = createInterface({ input: child.stdout, terminal: false });
+
+    rl.on("line", (raw) => {
+      const trimmed = raw.trim();
+      if (!trimmed) return;
+      let parsed;
+      try { parsed = JSON.parse(trimmed); } catch { return; }
+
+      log("debug", `[${requestId}] event: ${JSON.stringify({ type: parsed.type, subtype: parsed.subtype, hasText: !!parsed.text, hasResult: !!parsed.result })}`);
+
+      if (parsed.session_id && sessionKey) setSession(sessionKey, parsed.session_id);
+
+      const type = parsed.type;
+
+      if (type === "tool_call") {
+        const callId = parsed.call_id || "unknown";
+        const tc = parsed.tool_call || {};
+        const toolKey = Object.keys(tc)[0] || "unknown";
+        if (parsed.subtype === "started") {
+          toolCalls.set(callId, { tool: toolKey, startTime: Date.now() });
+          const args = tc[toolKey]?.args;
+          const argsSummary = args ? JSON.stringify(args).slice(0, 120) : "";
+          log("info", `[${requestId}] tool:start ${toolKey}${argsSummary ? ` args=${argsSummary}` : ""} (call_id=${callId})`);
+        } else if (parsed.subtype === "completed") {
+          const tracked = toolCalls.get(callId);
+          const elapsed = tracked ? `${Date.now() - tracked.startTime}ms` : "?ms";
+          const result = tc[toolKey]?.result;
+          const ok = result ? !!result.success : null;
+          log("info", `[${requestId}] tool:done  ${tracked?.tool || toolKey} ${elapsed}${ok !== null ? ` ok=${ok}` : ""} (call_id=${callId})`);
+          toolCalls.delete(callId);
+        }
+        return;
+      }
+
+      if (type === "thinking") {
+        if (FORWARD_THINKING && parsed.text) {
+          hasStreamedContent = true;
+          const delta = { reasoning_content: parsed.text };
+          const chunk = {
+            id: requestId, object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000), model,
+            choices: [{ index: 0, delta, finish_reason: null }],
+          };
+          res.write("data: " + JSON.stringify(chunk) + "\n\n");
+        }
+        return;
+      }
+
+      if (type === "text" && parsed.text) {
+        hasStreamedContent = true;
+        res.write(sseEvent(requestId, model, { content: parsed.text }));
+        return;
+      }
+
+      if (type === "result" && typeof parsed.result === "string") {
+        resultText = parsed.result;
+      }
+    });
+
+    child.on("error", (err) => {
+      error = err;
+      log("error", `[${requestId}] cursor-agent spawn error: ${err.message}`);
+      done();
+    });
+
+    rl.on("close", () => done());
+  });
+}
+
 // ── Streaming handler (real-time thinking + smart chunked result) ────────────
 
 function resolveSessionKey(body, req) {
@@ -275,13 +382,16 @@ async function handleStream(req, res, body) {
   const { key: sessionKey, src: sessionSrc } = resolveSessionKey(body, req);
   const requestId = `chatcmpl-${randomUUID().slice(0, 8)}`;
   const msgPreview = userMsg.slice(0, 80).replace(/\n/g, " ");
+  const startTime = Date.now();
 
   log("info", `[${requestId}] stream request: model=${model}, session=${sessionKey || "none"}(${sessionSrc}), msg="${msgPreview}${userMsg.length > 80 ? "…" : ""}"`);
 
-  const child = spawnCursorAgent(userMsg, sessionKey, model);
-  const startTime = Date.now();
+  let child = spawnCursorAgent(userMsg, sessionKey, model);
+  let clientGone = false;
+  let timedOut = false;
 
   const timeout = setTimeout(() => {
+    timedOut = true;
     log("warn", `[${requestId}] request timeout after ${REQUEST_TIMEOUT_MS}ms, killing cursor-agent`);
     child.kill();
   }, REQUEST_TIMEOUT_MS);
@@ -293,127 +403,117 @@ async function handleStream(req, res, body) {
     "X-Accel-Buffering": "no",
   });
 
-  let resultText = "";
-  let hasStreamedContent = false;
-  let clientGone = false;
-  const toolCalls = new Map();
-
-  const rl = createInterface({ input: child.stdout, terminal: false });
-
-  rl.on("line", (raw) => {
-    const trimmed = raw.trim();
-    if (!trimmed) return;
-    let parsed;
-    try {
-      parsed = JSON.parse(trimmed);
-    } catch {
-      return;
-    }
-
-    log("debug", `[${requestId}] event: ${JSON.stringify({ type: parsed.type, subtype: parsed.subtype, hasText: !!parsed.text, hasResult: !!parsed.result })}`);
-
-    if (parsed.session_id && sessionKey) {
-      setSession(sessionKey, parsed.session_id);
-    }
-
-    const type = parsed.type;
-
-    if (type === "tool_call") {
-      const callId = parsed.call_id || "unknown";
-      const tc = parsed.tool_call || {};
-      const toolKey = Object.keys(tc)[0] || "unknown";
-      if (parsed.subtype === "started") {
-        toolCalls.set(callId, { tool: toolKey, startTime: Date.now() });
-        const args = tc[toolKey]?.args;
-        const argsSummary = args ? JSON.stringify(args).slice(0, 120) : "";
-        log("info", `[${requestId}] tool:start ${toolKey}${argsSummary ? ` args=${argsSummary}` : ""} (call_id=${callId})`);
-      } else if (parsed.subtype === "completed") {
-        const tracked = toolCalls.get(callId);
-        const elapsed = tracked ? `${Date.now() - tracked.startTime}ms` : "?ms";
-        const result = tc[toolKey]?.result;
-        const ok = result ? !!result.success : null;
-        log("info", `[${requestId}] tool:done  ${tracked?.tool || toolKey} ${elapsed}${ok !== null ? ` ok=${ok}` : ""} (call_id=${callId})`);
-        toolCalls.delete(callId);
-      }
-      return;
-    }
-
-    if (type === "thinking") {
-      if (FORWARD_THINKING && parsed.text) {
-        hasStreamedContent = true;
-        const delta = { reasoning_content: parsed.text };
-        const chunk = {
-          id: requestId,
-          object: "chat.completion.chunk",
-          created: Math.floor(Date.now() / 1000),
-          model,
-          choices: [{ index: 0, delta, finish_reason: null }],
-        };
-        res.write("data: " + JSON.stringify(chunk) + "\n\n");
-      }
-      return;
-    }
-
-    if (type === "text" && parsed.text) {
-      hasStreamedContent = true;
-      res.write(sseEvent(requestId, model, { content: parsed.text }));
-      return;
-    }
-
-    if (type === "result" && typeof parsed.result === "string") {
-      resultText = parsed.result;
-    }
-  });
-
-  child.on("error", (err) => {
-    clearTimeout(timeout);
-    log("error", `[${requestId}] cursor-agent spawn error: ${err.message}`);
-    if (!res.headersSent) {
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: { message: `cursor-agent error: ${err.message}` } }));
-    } else {
-      res.end();
-    }
-  });
-
-  rl.on("close", async () => {
-    clearTimeout(timeout);
-    const elapsed = Date.now() - startTime;
-
-    if (clientGone) {
-      log("info", `[${requestId}] agent finished after client disconnect, ${(elapsed / 1000).toFixed(1)}s, resultLen=${resultText.length}`);
-      return;
-    }
-
-    if (!hasStreamedContent && !resultText) {
-      res.write(sseEvent(requestId, model, { content: "(no response from cursor-agent)" }));
-    } else if (resultText && !hasStreamedContent) {
-      if (INSTANT_RESULT) {
-        res.write(sseEvent(requestId, model, { content: resultText }));
-      } else {
-        await streamChunked(res, requestId, model, resultText);
-      }
-    } else if (resultText && hasStreamedContent) {
-      log("debug", `[${requestId}] result received after text deltas, skipping duplicate`);
-    }
-
-    res.write(sseEvent(requestId, model, { finishReason: "stop" }));
-    res.write("data: [DONE]\n\n");
-    res.end();
-    log("info", `[${requestId}] completed in ${(elapsed / 1000).toFixed(1)}s, streamed=${hasStreamedContent}, resultLen=${resultText.length}`);
-  });
-
   req.on("close", () => {
     clientGone = true;
     clearTimeout(timeout);
     child.kill();
     log("info", `[${requestId}] client disconnected after ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
   });
+
+  let result = await processStreamOutput(child, { requestId, model, sessionKey, res });
+
+  if (clientGone) {
+    log("info", `[${requestId}] agent finished after client disconnect, ${((Date.now() - startTime) / 1000).toFixed(1)}s, resultLen=${result.resultText.length}`);
+    return;
+  }
+
+  if (result.error) {
+    recordFailure(result.error.message?.slice(0, 200));
+    clearTimeout(timeout);
+    res.end();
+    return;
+  }
+
+  const canRetry = !timedOut && !result.hasStreamedContent && !result.resultText
+    && child._usedSession && sessionKey;
+  if (canRetry) {
+    sessions.delete(sessionKey);
+    saveSessions(sessions);
+    log("warn", `[${requestId}] empty response with session, retrying without resume`);
+    child = spawnCursorAgent(userMsg, sessionKey, model, { skipSession: true });
+    result = await processStreamOutput(child, { requestId, model, sessionKey, res });
+    if (clientGone) return;
+    if (result.error) { recordFailure(result.error.message?.slice(0, 200)); clearTimeout(timeout); res.end(); return; }
+  }
+
+  clearTimeout(timeout);
+  const elapsed = Date.now() - startTime;
+  const hasContent = result.hasStreamedContent || !!result.resultText;
+
+  if (!hasContent) {
+    recordFailure(child._stderrBuf?.trim().slice(0, 200));
+    res.write(sseEvent(requestId, model, { content: "(no response from cursor-agent)" }));
+    if (canRetry) log("warn", `[${requestId}] retry also returned empty`);
+  } else {
+    recordSuccess();
+    if (canRetry) log("info", `[${requestId}] retry succeeded`);
+    if (result.resultText && !result.hasStreamedContent) {
+      if (INSTANT_RESULT) {
+        res.write(sseEvent(requestId, model, { content: result.resultText }));
+      } else {
+        await streamChunked(res, requestId, model, result.resultText);
+      }
+    } else if (result.resultText && result.hasStreamedContent) {
+      log("debug", `[${requestId}] result received after text deltas, skipping duplicate`);
+    }
+  }
+
+  res.write(sseEvent(requestId, model, { finishReason: "stop" }));
+  res.write("data: [DONE]\n\n");
+  res.end();
+  log("info", `[${requestId}] completed in ${(elapsed / 1000).toFixed(1)}s, streamed=${result.hasStreamedContent}, resultLen=${result.resultText.length}`);
 }
 
 // ── Non-streaming handler ───────────────────────────────────────────────────
 
-function handleNonStream(req, res, body) {
+function collectNonStreamOutput(child, { requestId, sessionKey }) {
+  return new Promise((resolve) => {
+    let resolved = false;
+    let stdout = "";
+    let error = null;
+    child.stdout.on("data", (d) => (stdout += d));
+
+    const done = () => {
+      if (resolved) return;
+      resolved = true;
+      let resultText = "";
+      let thinkingText = "";
+      if (!error) {
+        for (const line of stdout.split("\n")) {
+          try {
+            const p = JSON.parse(line.trim());
+            if (p.type === "tool_call") {
+              const callId = p.call_id || "unknown";
+              const tc = p.tool_call || {};
+              const toolKey = Object.keys(tc)[0] || "unknown";
+              if (p.subtype === "started") {
+                const args = tc[toolKey]?.args;
+                const argsSummary = args ? JSON.stringify(args).slice(0, 120) : "";
+                log("info", `[${requestId}] tool:start ${toolKey}${argsSummary ? ` args=${argsSummary}` : ""} (call_id=${callId})`);
+              } else if (p.subtype === "completed") {
+                const ok = tc[toolKey]?.result ? !!tc[toolKey].result.success : null;
+                log("info", `[${requestId}] tool:done  ${toolKey}${ok !== null ? ` ok=${ok}` : ""} (call_id=${callId})`);
+              }
+            }
+            if (p.type === "result" && typeof p.result === "string") resultText = p.result;
+            if (p.type === "thinking" && FORWARD_THINKING && p.text) thinkingText += p.text;
+            if (p.session_id && sessionKey) setSession(sessionKey, p.session_id);
+          } catch {}
+        }
+      }
+      resolve({ resultText, thinkingText, error });
+    };
+
+    child.on("error", (err) => {
+      error = err;
+      log("error", `[${requestId}] cursor-agent spawn error: ${err.message}`);
+      done();
+    });
+    child.on("close", () => done());
+  });
+}
+
+async function handleNonStream(req, res, body) {
   const userMsg = extractUserMessage(body.messages);
   const model = body.model || "auto";
   const { key: sessionKey, src: sessionSrc } = resolveSessionKey(body, req);
@@ -423,73 +523,77 @@ function handleNonStream(req, res, body) {
 
   log("info", `[${requestId}] non-stream request: model=${model}, session=${sessionKey || "none"}(${sessionSrc}), msg="${msgPreview}${userMsg.length > 80 ? "…" : ""}"`);
 
-  const child = spawnCursorAgent(userMsg, sessionKey, model);
-  let stdout = "";
-  child.stdout.on("data", (d) => (stdout += d));
+  const sendError = (err) => {
+    res.writeHead(500, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: { message: `cursor-agent error: ${err.message}` } }));
+  };
+
+  let child = spawnCursorAgent(userMsg, sessionKey, model);
+  let timedOut = false;
 
   const timeout = setTimeout(() => {
+    timedOut = true;
     log("warn", `[${requestId}] request timeout after ${REQUEST_TIMEOUT_MS}ms, killing cursor-agent`);
     child.kill();
   }, REQUEST_TIMEOUT_MS);
 
-  child.on("error", (err) => {
-    clearTimeout(timeout);
-    log("error", `[${requestId}] cursor-agent spawn error: ${err.message}`);
-    res.writeHead(500, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: { message: `cursor-agent error: ${err.message}` } }));
-  });
+  let result = await collectNonStreamOutput(child, { requestId, sessionKey });
 
-  child.on("close", () => {
+  if (result.error) {
+    recordFailure(result.error.message?.slice(0, 200));
     clearTimeout(timeout);
-    let resultText = "";
-    let thinkingText = "";
-    for (const line of stdout.split("\n")) {
-      try {
-        const p = JSON.parse(line.trim());
-        if (p.type === "tool_call") {
-          const callId = p.call_id || "unknown";
-          const tc = p.tool_call || {};
-          const toolKey = Object.keys(tc)[0] || "unknown";
-          if (p.subtype === "started") {
-            const args = tc[toolKey]?.args;
-            const argsSummary = args ? JSON.stringify(args).slice(0, 120) : "";
-            log("info", `[${requestId}] tool:start ${toolKey}${argsSummary ? ` args=${argsSummary}` : ""} (call_id=${callId})`);
-          } else if (p.subtype === "completed") {
-            const ok = tc[toolKey]?.result ? !!tc[toolKey].result.success : null;
-            log("info", `[${requestId}] tool:done  ${toolKey}${ok !== null ? ` ok=${ok}` : ""} (call_id=${callId})`);
-          }
-        }
-        if (p.type === "result" && typeof p.result === "string") resultText = p.result;
-        if (p.type === "thinking" && FORWARD_THINKING && p.text) thinkingText += p.text;
-        if (p.session_id && sessionKey) {
-          setSession(sessionKey, p.session_id);
-        }
-      } catch {}
+    sendError(result.error);
+    return;
+  }
+
+  let retried = false;
+  if (!timedOut && !result.resultText && child._usedSession && sessionKey) {
+    retried = true;
+    sessions.delete(sessionKey);
+    saveSessions(sessions);
+    log("warn", `[${requestId}] empty response with session, retrying without resume`);
+    child = spawnCursorAgent(userMsg, sessionKey, model, { skipSession: true });
+    result = await collectNonStreamOutput(child, { requestId, sessionKey });
+    if (result.error) {
+      recordFailure(result.error.message?.slice(0, 200));
+      clearTimeout(timeout);
+      sendError(result.error);
+      return;
     }
+  }
 
-    const content = resultText || "(no response)";
+  clearTimeout(timeout);
 
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(
-      JSON.stringify({
-        id: requestId,
-        object: "chat.completion",
-        created: Math.floor(Date.now() / 1000),
-        model,
-        choices: [{
-          index: 0,
-          message: {
-            role: "assistant",
-            content,
-            ...(thinkingText ? { reasoning_content: thinkingText } : {}),
-          },
-          finish_reason: "stop",
-        }],
-        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
-      }),
-    );
-    log("info", `[${requestId}] completed in ${((Date.now() - startTime) / 1000).toFixed(1)}s, resultLen=${content.length}`);
-  });
+  if (result.resultText) {
+    recordSuccess();
+    if (retried) log("info", `[${requestId}] retry succeeded`);
+  } else {
+    recordFailure(child._stderrBuf?.trim().slice(0, 200));
+    if (retried) log("warn", `[${requestId}] retry also returned empty`);
+  }
+
+  const content = result.resultText || "(no response)";
+
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(
+    JSON.stringify({
+      id: requestId,
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [{
+        index: 0,
+        message: {
+          role: "assistant",
+          content,
+          ...(result.thinkingText ? { reasoning_content: result.thinkingText } : {}),
+        },
+        finish_reason: "stop",
+      }],
+      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+    }),
+  );
+  log("info", `[${requestId}] completed in ${((Date.now() - startTime) / 1000).toFixed(1)}s, resultLen=${content.length}`);
 }
 
 // ── Auth & CORS ─────────────────────────────────────────────────────────────
@@ -548,7 +652,7 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "GET" && req.url === "/v1/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    return res.end(JSON.stringify({ status: "ok", cursor: !!CURSOR_PATH, port: PORT, sessions: sessions.size, scriptHash: SCRIPT_HASH }));
+    return res.end(JSON.stringify({ status: "ok", cursor: !!CURSOR_PATH, port: PORT, sessions: sessions.size, scriptHash: SCRIPT_HASH, consecutiveFailures, lastErrorTime, lastErrorMsg }));
   }
 
   if (req.method === "GET" && req.url === "/v1/models") {

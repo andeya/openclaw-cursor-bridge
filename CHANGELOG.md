@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-03-05
+
+### Added
+
+- **Session-aware retry**: when `cursor-agent` returns empty result with an active `--resume` session, automatically clear the stale session and retry once without resume
+- **Consecutive failure watchdog**: proxy tracks consecutive empty responses; after 5 failures (configurable via `CURSOR_PROXY_MAX_CONSECUTIVE_FAILURES`), self-exits with code 2 to trigger gateway restart
+- **Enhanced `/v1/health`**: response now includes `consecutiveFailures`, `lastErrorTime`, and `lastErrorMsg` for diagnostics
+- **Gateway auto-restart**: proxy crash triggers automatic restart with exponential backoff (2s → 10s → 60s), max 3 attempts; counter resets after 5 minutes of stable operation
+- Refactored streaming handler: extracted `processStreamOutput` and `collectNonStreamOutput` helpers for cleaner retry flow
+
 ## [1.3.4] - 2026-03-05
 
 ### Added
