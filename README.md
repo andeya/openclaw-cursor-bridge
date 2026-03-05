@@ -1,4 +1,7 @@
 <p align="center">
+  <a href="https://github.com/openclaw/openclaw"><img src="./doc/openclaw-logo.svg" width="96" height="96" alt="OpenClaw" style="vertical-align: middle"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://cursor.sh"><img src="./doc/cursor-logo.svg" width="80" height="80" alt="Cursor" style="vertical-align: middle"></a>
   <h1 align="center">openclaw-cursor-brain</h1>
   <p align="center">
     Use <a href="https://cursor.sh">Cursor</a> as the AI brain for <a href="https://github.com/openclaw/openclaw">OpenClaw</a> — with full access to every plugin tool.
@@ -51,24 +54,53 @@ During **setup** (and **upgrade**), models are dynamically discovered from `curs
 ## How It Works
 
 ```mermaid
-flowchart TB
-    subgraph path1["OpenClaw → Cursor (AI Backend)"]
+flowchart LR
+    subgraph Channels ["📱 Messaging Channels"]
         direction TB
-        User["User Message"] --> GW["OpenClaw Gateway"]
-        GW --> Proxy["Streaming Proxy :18790"]
-        Proxy --> Agent["cursor-agent --stream-partial-output"]
-        Agent --> SSE["Text deltas → SSE stream"]
+        Feishu["Feishu"]
+        Slack["Slack"]
+        Web["Web / API"]
     end
 
-    subgraph path2["Cursor → OpenClaw (Tool Calls)"]
+    subgraph Core ["🔄 Bidirectional Bridge"]
         direction TB
-        IDE["Cursor IDE"] --> MCP["MCP Server (stdio)"]
-        MCP --> REST["Gateway REST API /tools/invoke"]
-        REST --> Tools["Plugin Tools: Feishu · Slack · GitHub · …"]
+        GW["OpenClaw\nGateway"]
+
+        subgraph ProxyBox ["⚡ Streaming Proxy :18790"]
+            Proxy["OpenAI-compatible API\n• Session auto-derive\n• InstantResult\n• scriptHash auto-restart"]
+        end
+
+        subgraph MCPBox ["🔌 MCP Server (stdio)"]
+            MCP["Tool Gateway\n• Rich descriptions\n• Timeout + retry\n• Auto-discovery"]
+        end
     end
 
-    style Proxy fill:#2563eb,color:#fff
-    style SSE fill:#10b981,color:#fff
+    subgraph AI ["🧠 Cursor Agent"]
+        Agent["cursor-agent CLI\n--stream-partial-output\n--resume session"]
+    end
+
+    subgraph Tools ["🛠️ Plugin Tools"]
+        direction TB
+        T1["feishu_doc"]
+        T2["feishu_wiki"]
+        T3["GitHub · DB · …"]
+    end
+
+    Channels -->|"User messages"| GW
+    GW -->|"POST /v1/chat/completions"| Proxy
+    Proxy -->|"spawn + stdin"| Agent
+    Agent -->|"SSE stream"| Proxy
+    Proxy -->|"Response"| GW
+    GW -->|"Reply"| Channels
+
+    Agent <-->|"MCP stdio"| MCP
+    MCP -->|"POST /tools/invoke"| GW
+    GW --> Tools
+
+    style Proxy fill:#2563eb,color:#fff,stroke:#1d4ed8
+    style MCP fill:#7c3aed,color:#fff,stroke:#6d28d9
+    style Agent fill:#ea580c,color:#fff,stroke:#c2410c
+    style GW fill:#0891b2,color:#fff,stroke:#0e7490
 ```
 
 Two auto-configured paths:

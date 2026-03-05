@@ -74,48 +74,103 @@ openclaw-cursor-brain/
 
 ```mermaid
 flowchart LR
-    subgraph pathA ["路径 A: OpenClaw -> Cursor (AI 后端)"]
-        direction LR
-        User["用户消息<br/>(飞书/Slack/Web)"] --> GW["OpenClaw<br/>Gateway"]
-        GW -->|"POST /v1/chat/completions"| Proxy["Streaming<br/>Proxy :18790"]
-        Proxy -->|"spawn + stdin"| Agent["cursor-agent<br/>CLI"]
-        Agent -->|"stdout JSON lines"| Proxy
-        Proxy -->|"SSE stream"| GW
+    subgraph Channels ["📱 消息通道"]
+        direction TB
+        CH1["飞书群/私聊"]
+        CH2["Slack 频道"]
+        CH3["Web / 自定义"]
     end
 
-    subgraph pathB ["路径 B: Cursor -> OpenClaw (工具调用)"]
+    subgraph pathA ["路径 A: OpenClaw → Cursor（AI 后端）"]
         direction LR
-        IDE["Cursor IDE"] -->|"stdio"| MCP["MCP Server"]
-        MCP -->|"POST /tools/invoke"| REST["Gateway<br/>REST API"]
-        REST --> Tools["插件工具<br/>飞书/Slack/GitHub/..."]
+        GW_A["OpenClaw\nGateway"]
+        subgraph ProxyDetail ["⚡ Streaming Proxy :18790"]
+            direction TB
+            API["OpenAI 兼容 API"]
+            SessionMgr["Session 自动推导\n(meta → key → --resume)"]
+            API --- SessionMgr
+        end
+        Agent["🧠 cursor-agent\n-p --stream-partial-output\n--trust --approve-mcps"]
     end
+
+    subgraph pathB ["路径 B: Cursor → OpenClaw（工具调用）"]
+        direction LR
+        subgraph MCPDetail ["🔌 MCP Server (stdio)"]
+            direction TB
+            MCPCore["工具代理 + 重试"]
+            Skills["Rich Instructions\n(extractSkillBrief)"]
+            MCPCore --- Skills
+        end
+        GW_B["Gateway\nREST API"]
+    end
+
+    subgraph Tools ["🛠️ 插件生态"]
+        direction TB
+        T1["feishu_doc\nfeishu_wiki"]
+        T2["GitHub\nSlack"]
+        T3["Database\n自定义插件"]
+    end
+
+    Channels -->|"用户消息"| GW_A
+    GW_A -->|"POST /v1/chat/completions\n(含 Conversation info 元数据)"| API
+    SessionMgr -->|"spawn + stdin\n(--resume sessionId)"| Agent
+    Agent -->|"stdout: JSON lines\n(text/result/tool_call/session_id)"| API
+    API -->|"SSE 实时流\ndata: {choices:[{delta:{content}}]}"| GW_A
+    GW_A -->|"回复"| Channels
+
+    Agent <-->|"MCP stdio\n(CallTool)"| MCPCore
+    MCPCore -->|"POST /tools/invoke\n{tool, args}"| GW_B
+    GW_B --> Tools
+
+    style API fill:#2563eb,color:#fff,stroke:#1d4ed8
+    style SessionMgr fill:#1e40af,color:#fff,stroke:#1e3a8a
+    style MCPCore fill:#7c3aed,color:#fff,stroke:#6d28d9
+    style Skills fill:#6d28d9,color:#fff,stroke:#5b21b6
+    style Agent fill:#ea580c,color:#fff,stroke:#c2410c
+    style GW_A fill:#0891b2,color:#fff,stroke:#0e7490
+    style GW_B fill:#0891b2,color:#fff,stroke:#0e7490
 ```
 
-**路径 A** 解决"AI 后端"问题：OpenClaw 的消息通道（飞书群、Slack 频道等）收到用户消息后，通过 Gateway 发给 Streaming Proxy。Proxy 启动 cursor-agent 进程，实时流式返回 AI 响应。
+**路径 A**（上方）解决"AI 后端"问题：消息通道收到用户请求后，Gateway 以 OpenAI 格式 POST 到 Streaming Proxy。Proxy 自动从消息元数据推导 session key，用 `--resume` 复用 cursor-agent 会话，实时流式返回 AI 响应。
 
-**路径 B** 解决"工具调用"问题：Cursor IDE 在推理过程中需要调用外部工具（读飞书文档、查数据库等），通过 MCP 协议调用 MCP Server，后者转发到 OpenClaw Gateway REST API，由对应插件执行。
+**路径 B**（下方）解决"工具调用"问题：cursor-agent 推理过程中需要外部工具时，通过 MCP 协议调用 MCP Server，后者将请求转发到 Gateway REST API。MCP Server 指令中嵌入了丰富的工具描述，使 LLM 可以直接调用而非先查文档。
 
 ### 2.2 组件关系
 
 ```mermaid
 flowchart TB
-    PluginEntry["index.ts<br/>插件入口"]
-    Setup["src/setup.ts<br/>安装配置"]
-    Doctor["src/doctor.ts<br/>健康检查"]
-    Cleanup["src/cleanup.ts<br/>卸载清理"]
-    Constants["src/constants.ts<br/>常量定义"]
-    MCPServer["mcp-server/server.mjs<br/>MCP Server"]
-    Proxy["mcp-server/streaming-proxy.mjs<br/>Streaming Proxy"]
+    subgraph Orchestration ["🎛️ 编排层 (Gateway 启动时运行)"]
+        PluginEntry["<b>index.ts</b>\n插件入口 · register() · CLI"]
+        Setup["<b>setup.ts</b>\nCursor 检测 · 模型发现\nMCP 配置 · 格式探测"]
+        Doctor["<b>doctor.ts</b>\n11 项健康检查"]
+        Cleanup["<b>cleanup.ts</b>\n3 层卸载清理"]
+    end
+
+    subgraph Runtime ["⚙️ 运行时 (常驻进程)"]
+        Proxy["<b>streaming-proxy.mjs</b>\nHTTP :18790 · Session 管理\nSSE 流 · 工具调用日志"]
+        MCPServer["<b>server.mjs</b>\n工具发现 · 富指令\n超时/重试 · 缓存"]
+    end
+
+    subgraph External ["🌐 外部依赖"]
+        GW["OpenClaw Gateway\nREST API :18789"]
+        Agent["cursor-agent CLI\n--stream-partial-output"]
+        CursorIDE["Cursor IDE\n(管理 MCP 生命周期)"]
+    end
 
     PluginEntry -->|"runSetup()"| Setup
-    PluginEntry -->|"startProxy()"| Proxy
+    PluginEntry -->|"startProxy()\nscriptHash 检测"| Proxy
     PluginEntry -->|"runDoctorChecks()"| Doctor
     PluginEntry -->|"runCleanup()"| Cleanup
-    Setup --> Constants
-    Doctor --> Constants
-    Cleanup --> Constants
-    MCPServer -->|"Gateway REST"| GatewayAPI["OpenClaw Gateway"]
-    Proxy -->|"spawn"| CursorAgent["cursor-agent CLI"]
+    Proxy -->|"spawn per request"| Agent
+    MCPServer -->|"POST /tools/invoke"| GW
+    CursorIDE -->|"stdio 启动"| MCPServer
+
+    style PluginEntry fill:#0891b2,color:#fff,stroke:#0e7490
+    style Setup fill:#0891b2,color:#e0f2fe,stroke:#0e7490
+    style Proxy fill:#2563eb,color:#fff,stroke:#1d4ed8
+    style MCPServer fill:#7c3aed,color:#fff,stroke:#6d28d9
+    style Agent fill:#ea580c,color:#fff,stroke:#c2410c
+    style GW fill:#059669,color:#fff,stroke:#047857
 ```
 
 ### 2.3 关键设计决策
@@ -141,21 +196,32 @@ MCP Server 通过 stdio 与 Cursor IDE 通信（由 `~/.cursor/mcp.json` 配置�
 
 ```mermaid
 flowchart TD
-    Start["register(api) 被调用"] --> IsUninstall{"argv 含<br/>uninstall/upgrade?"}
-    IsUninstall -->|"是"| SkipSetup["跳过 setup 和 proxy"]
-    IsUninstall -->|"否"| RunSetup["runSetup(ctx)"]
-    RunSetup --> SyncProvider{"provider 配置<br/>是否变化?"}
-    SyncProvider -->|"相同"| LogUnchanged["日志: unchanged"]
-    SyncProvider -->|"不同"| WriteConfig["writeConfigFile(patch)"]
-    WriteConfig --> CheckProxy{"proxy<br/>是否运行?"}
+    Start(["🚀 register(api) 被调用"])
+    Start --> IsUninstall{"argv 含\nuninstall / upgrade?"}
+    IsUninstall -->|"是"| SkipSetup["⏭️ 跳过 setup 和 proxy"]
+
+    IsUninstall -->|"否"| RunSetup["runSetup(ctx)\nCursor 检测 · 模型发现 · MCP 写入"]
+    RunSetup --> SyncProvider{"provider 配置\n是否变化?"}
+    SyncProvider -->|"JSON.stringify\n相同"| LogUnchanged["📋 日志: unchanged\n跳过写入"]
+    SyncProvider -->|"不同"| WriteConfig["💾 writeConfigFile(patch)\n同步 models + agents"]
+
+    WriteConfig --> CheckProxy
     LogUnchanged --> CheckProxy
-    CheckProxy -->|"未运行"| StartProxy["startProxy()"]
-    CheckProxy -->|"运行中"| HashCheck{"scriptHash<br/>是否一致?"}
-    HashCheck -->|"一致"| LogUpToDate["日志: up-to-date"]
-    HashCheck -->|"不一致"| StartProxy
-    StartProxy --> RegisterCLI["注册 CLI 命令"]
+    CheckProxy{"proxy\n是否运行?"}
+    CheckProxy -->|"未运行"| StartProxy["🔄 startProxy()\nkill → wait → spawn"]
+    CheckProxy -->|"运行中"| HashCheck{"scriptHash\n是否一致?"}
+    HashCheck -->|"SHA-256 匹配"| LogUpToDate["✅ 日志: up-to-date"]
+    HashCheck -->|"哈希不同\n代码已更新"| StartProxy
+
+    StartProxy --> RegisterCLI["📝 注册 CLI 命令\nsetup · doctor · status\nupgrade · uninstall · proxy"]
     LogUpToDate --> RegisterCLI
     SkipSetup --> RegisterCLI
+
+    style Start fill:#0891b2,color:#fff
+    style RunSetup fill:#2563eb,color:#fff
+    style WriteConfig fill:#7c3aed,color:#fff
+    style StartProxy fill:#ea580c,color:#fff
+    style RegisterCLI fill:#059669,color:#fff
 ```
 
 #### 配置去重
@@ -277,51 +343,51 @@ MCP Server 是本项目最复杂的模块，负责将 OpenClaw 的所有插件�
 
 ```mermaid
 flowchart TD
-    Phase1["阶段 1: discoverCandidateTools()"]
-    Phase2["阶段 2: discoverVerifiedTools()"]
-    Phase3["阶段 3: server.tool() 注册"]
-
-    Phase1 -->|"Map&lt;name, meta&gt;"| Phase2
-    Phase2 -->|"过滤存活工具"| Phase3
-
-    subgraph p1 ["阶段 1: 候选工具发现"]
-        ReadConfig["读取 openclaw.json"]
-        ScanSkills["扫描 SKILL.md 文件"]
-        ScanSource["扫描 src/*.ts 源码"]
-        ReadConfig --> ScanSkills
-        ReadConfig --> ScanSource
+    subgraph p1 ["📂 阶段 1: 候选工具发现 (磁盘 I/O, 60s 缓存)"]
+        ReadConfig["读取 openclaw.json\n→ 获取插件安装路径"] --> ScanSkills["扫描 SKILL.md\n→ 工具名 + 完整文档"]
+        ReadConfig --> ScanSource["扫描 src/*.ts\n→ name/description 模式匹配"]
+        ScanSkills --> Merge["合并: Map&lt;name, {skill?, desc?}&gt;"]
+        ScanSource --> Merge
     end
 
-    subgraph p2 ["阶段 2: 存活性验证"]
-        Probe["并行 POST /tools/invoke<br/>探测每个候选工具"]
-        Filter["过滤: ok || error.type != not_found"]
-        Probe --> Filter
+    subgraph p2 ["🔍 阶段 2: 存活性验证 (并行网络探测)"]
+        Probe["Promise.allSettled\n并行 POST /tools/invoke {}\n每个候选工具 · 5s 超时"]
+        Probe --> Filter["过滤:\nok || error.type ≠ 'not_found'"]
     end
 
-    subgraph p3 ["阶段 3: MCP 注册"]
-        DynTools["动态工具: feishu_doc, feishu_wiki, ..."]
-        StaticTools["静态工具: openclaw_invoke,<br/>openclaw_discover, openclaw_skill"]
+    subgraph p3 ["✅ 阶段 3: MCP 注册"]
+        direction LR
+        DynTools["动态工具 (per-tool)\nfeishu_doc · feishu_wiki · …\n→ {action?, args_json?}"]
+        StaticTools["内置工具\nopenclaw_invoke\nopenclaw_discover\nopenclaw_skill"]
     end
+
+    Merge -->|"Map&lt;name, meta&gt;\n候选 N 个"| Probe
+    Filter -->|"验证通过 M 个\n(M ≤ N)"| DynTools
+
+    style Merge fill:#2563eb,color:#fff
+    style Probe fill:#7c3aed,color:#fff
+    style Filter fill:#7c3aed,color:#fff
+    style DynTools fill:#059669,color:#fff
+    style StaticTools fill:#059669,color:#fff
 ```
 
-**阶段 1: `discoverCandidateTools()`** (L253-297)
+**阶段 1: `discoverCandidateTools()`**
 
-从两个来源扫描候选工具：
-- **SKILL.md 文件**：读取每个插件的 `skills/` 目录，从 frontmatter 中提取工具名和 skill 内容
-- **源码扫描**：解析 `src/*.ts` 文件中的 `name: "tool_name"` 模式，提取工具名和描述
+从两个来源扫描候选工具（纯磁盘 I/O，不依赖 Gateway）：
+- **SKILL.md 文件**：读取每个插件 `skills/` 目录下的子目录，目录名转换为工具名（如 `feishu-doc` → `feishu_doc`），读取完整 SKILL.md 内容（含内联的 `references/*.md`）
+- **源码扫描**（fallback）：解析 `src/*.ts` 文件中的 `name: "tool_name"` 和 `description: "..."` 模式，提取未被 SKILL.md 覆盖的工具名和描述
 
-**阶段 2: `discoverVerifiedTools()`** (L313-333)
+**阶段 2: `discoverVerifiedTools()`**
 
 对每个候选工具发起 REST probe（`POST /tools/invoke` 带空参数），确认 Gateway 上确实注册了该工具。使用 `Promise.allSettled` 并行探测，5 秒超时。
 
 **阶段 3: 动态注册**
 
-通过 `server.tool(name, description, schema, handler)` 将验证通过的工具注册到 MCP Server。每个工具的 schema 统一为 `{ action?: string, args_json?: string }`。
+通过 `server.tool(name, description, schema, handler)` 将验证通过的工具注册到 MCP Server。每个工具的 schema 统一为 `{ action?: string, args_json?: string }`。description 由 SKILL.md frontmatter 描述 + skill 使用提示组成。
 
 #### 缓存层
 
 ```javascript
-// server.mjs L299-311
 let _candidateCache = null;
 let _candidateCacheAt = 0;
 const CANDIDATE_TTL_MS = 60_000;
@@ -341,9 +407,9 @@ function getCachedCandidateTools(forceRefresh = false) {
 
 #### 服务器指令构建
 
-`buildServerInstructions()` (L402-428) 生成 MCP 服务器指令，嵌入到 `McpServer` 的 `instructions` 字段。这些指令会出现在 Cursor 的系统提示中，指导 LLM 如何使用工具。
+`buildServerInstructions()` 生成 MCP 服务器指令，嵌入到 `McpServer` 的 `instructions` 字段。这些指令会出现在 Cursor 的系统提示中，指导 LLM 如何使用工具。
 
-`extractSkillBrief()` (L355-395) 从 SKILL.md 中提取关键信息：
+`extractSkillBrief()` 从 SKILL.md 中提取关键信息：
 
 | 提取项 | 来源 | 目的 |
 |---|---|---|
@@ -354,6 +420,25 @@ function getCachedCandidateTools(forceRefresh = false) {
 | 依赖提示 | `**Dependency:**` / `**Note:**` | LLM 知道工具间的依赖关系 |
 
 这些信息嵌入服务器指令后，LLM 可以直接调用工具而无需先调 `openclaw_skill` 获取文档，减少一次工具调用。
+
+#### 能力简介注入
+
+**问题**：当 Gateway 启动慢或不可用时，动态工具无法注册，MCP Server 只有 3 个静态工具（`openclaw_invoke`、`openclaw_discover`、`openclaw_skill`）。此时它们的 description 不提及任何具体能力（如飞书文档），LLM 看到飞书 URL 时不会想到使用 MCP。
+
+**解决**：`buildCapabilitySummary()` 从候选工具元数据中生成一段能力简介，附加到 `openclaw_invoke` 和 `openclaw_discover` 的 description 末尾：
+
+```
+openclaw_invoke: "Call any OpenClaw Gateway tool by name...
+  Available: feishu_doc: Feishu document read/write operations.
+  Activate when user mentions Feishu docs, cloud docs, or docx links.;
+  feishu_wiki: ...; feishu_drive: ..."
+```
+
+由于候选工具来自磁盘扫描（阶段 1），不依赖 Gateway，即使 Gateway 不可用，LLM 也能从静态工具的 description 中知道有哪些能力。
+
+#### 延迟加载的 Skill 缓存
+
+`getSkillsByTool()` 提供独立于 Gateway 的 skill 内容访问。首次调用时从 `discoverCandidateTools()` 提取所有带 skill 的工具，缓存在内存中。`openclaw_skill` 工具使用此函数按需获取文档，不依赖启动时的 Gateway 探测结果。
 
 #### 四个内置工具
 
@@ -366,7 +451,7 @@ function getCachedCandidateTools(forceRefresh = false) {
 
 #### Gateway REST 调用
 
-`invokeGatewayTool()` (L65-88) 实现带重试的 REST 调用：
+`invokeGatewayTool()` 实现带重试的 REST 调用：
 
 - 超时：默认 60 秒（`OPENCLAW_TOOL_TIMEOUT_MS`）
 - 重试条件：`AbortError`（超时）、`ECONNREFUSED`、`ECONNRESET`
@@ -417,15 +502,30 @@ cursor-agent 通过 stdout 输出 JSON lines，每行一个事件：
 
 ```mermaid
 flowchart LR
-    JSONLines["cursor-agent<br/>stdout"] --> Parse["JSON.parse<br/>每行"]
-    Parse --> Switch{"event.type"}
-    Switch -->|"tool_call"| ToolLog["结构化日志<br/>tool:start/done"]
-    Switch -->|"thinking"| Thinking{"FORWARD_THINKING?"}
-    Thinking -->|"true"| ForwardThink["SSE: reasoning_content"]
-    Thinking -->|"false"| Drop["丢弃"]
-    Switch -->|"text"| TextDelta["SSE: content delta"]
-    Switch -->|"result"| Store["存储 resultText"]
-    Switch -->|"session_id"| SaveSession["持久化 session"]
+    Input["📥 cursor-agent\nstdout JSON lines"] --> Parse["JSON.parse\n逐行解析"]
+    Parse --> Switch{"event.type?"}
+
+    Switch -->|"tool_call"| ToolBranch{"subtype?"}
+    ToolBranch -->|"started"| ToolStart["📊 tool:start 日志\n记录名称 · 参数 · call_id\n开始计时"]
+    ToolBranch -->|"completed"| ToolDone["📊 tool:done 日志\n耗时 · 成功/失败"]
+
+    Switch -->|"thinking"| ThinkBranch{"FORWARD_\nTHINKING?"}
+    ThinkBranch -->|"true"| ForwardThink["🧠 SSE:\nreasoning_content"]
+    ThinkBranch -->|"false"| Drop["🗑️ 丢弃"]
+
+    Switch -->|"text"| TextDelta["📝 SSE:\ncontent delta\n(实时推送)"]
+
+    Switch -->|"result"| ResultBranch{"INSTANT_\nRESULT?"}
+    ResultBranch -->|"true"| InstantSend["⚡ 一次性发送\n零延迟"]
+    ResultBranch -->|"false"| ChunkedSend["📤 分块流式\n~200 chars/s"]
+
+    Switch -->|"任意含\nsession_id"| SaveSession["💾 setSession()\n持久化到磁盘"]
+
+    style Input fill:#ea580c,color:#fff
+    style TextDelta fill:#2563eb,color:#fff
+    style ForwardThink fill:#7c3aed,color:#fff
+    style InstantSend fill:#059669,color:#fff
+    style SaveSession fill:#0891b2,color:#fff
 ```
 
 #### 流式 vs 非流式
@@ -530,34 +630,51 @@ Gateway 连通性检测使用双平台方案：Unix 用 `curl`（最高效），
 
 ```mermaid
 sequenceDiagram
-    participant U as 用户 (飞书)
-    participant GW as OpenClaw Gateway
-    participant P as Streaming Proxy
-    participant A as cursor-agent
-    participant MCP as MCP Server
-    participant API as Gateway REST
+    participant U as 👤 用户 (飞书)
+    participant GW as 🌐 OpenClaw Gateway
+    participant P as ⚡ Streaming Proxy
+    participant S as 💾 Session Store
+    participant A as 🧠 cursor-agent
+    participant MCP as 🔌 MCP Server
+    participant API as 🛠️ Gateway REST
 
     U->>GW: "总结：https://feishu.cn/docx/ABC123"
-    GW->>P: POST /v1/chat/completions<br/>(stream: true)
-    P->>A: spawn cursor-agent -p --stream-partial-output
-    Note over P,A: stdin: 用户消息
+    GW->>P: POST /v1/chat/completions (stream: true)
+    Note over GW,P: 请求体含 Conversation info 元数据<br/>(sender_id, group_channel...)
 
-    A->>A: LLM 思考: 识别飞书 URL
+    rect rgb(219, 234, 254)
+        Note over P,S: Session 自动推导
+        P->>P: extractSessionFromMeta()<br/>→ auto:dm:ou_xxx
+        P->>S: sessions.get("auto:dm:ou_xxx")
+        S-->>P: cursorSessionId = "abc-def"
+    end
 
-    A->>MCP: tool_call: feishu_doc(read, ABC123)
-    MCP->>API: POST /tools/invoke
-    API-->>MCP: 文档内容
-    MCP-->>A: 工具结果
+    P->>A: spawn cursor-agent -p --resume abc-def
+    Note over P,A: stdin 写入用户消息
 
-    Note over P: tool:start feishu_doc (日志)
-    Note over P: tool:done feishu_doc 433ms (日志)
+    rect rgb(254, 243, 199)
+        Note over A,API: 工具调用（按需）
+        A->>A: LLM 思考: 识别飞书 URL → 调用 feishu_doc
+        A->>MCP: tool_call: feishu_doc(read, ABC123)
+        Note over P: 📊 tool:start feishu_doc
+        MCP->>API: POST /tools/invoke {tool, args}
+        API-->>MCP: 文档内容 (3.2KB)
+        MCP-->>A: 工具结果
+        Note over P: 📊 tool:done feishu_doc 433ms ✓
+    end
 
     A->>A: LLM 生成总结
+    A-->>P: stdout: {type:"result", result:"这篇文档介绍了..."}
+    A-->>P: stdout: {session_id: "abc-def-new"}
 
-    A-->>P: result: "这篇文档介绍了..."
-    P-->>GW: SSE: data: {"choices":[{"delta":{"content":"..."}}]}
-    P-->>GW: data: [DONE]
-    GW-->>U: 总结内容
+    rect rgb(220, 252, 231)
+        Note over P: 响应 + 持久化
+        P->>S: setSession("auto:dm:ou_xxx", "abc-def-new")
+        P-->>GW: SSE: data: {"choices":[{"delta":{"content":"..."}}]}
+        P-->>GW: data: [DONE]
+    end
+
+    GW-->>U: 📝 总结内容
 ```
 
 ### 4.2 工具调用链路
@@ -593,19 +710,36 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    Req["新请求到达"] --> Resolve["resolveSessionKey()<br/>body / header / meta"]
-    Resolve --> HasKey{"有 session key?"}
-    HasKey -->|"否"| NewSession["spawn cursor-agent<br/>(无 --resume)"]
-    HasKey -->|"是"| Lookup["sessions.get(key)<br/>从 cursor-sessions.json"]
+    Req(["📨 新请求到达"])
+    Req --> ExplicitCheck{"body/header 含\n显式 session ID?"}
+
+    ExplicitCheck -->|"_openclaw_session_id\nsession_id\nX-OpenClaw-Session-Id\nX-Session-Id"| ExplicitKey["✅ 使用显式 key"]
+    ExplicitCheck -->|"无"| MetaCheck{"消息含\nConversation info?"}
+
+    MetaCheck -->|"有 sender_id\n或 group_channel"| AutoKey["🔄 自动推导 key\nauto:dm:{sender_id}\nauto:grp:{channel}:{topic}"]
+    MetaCheck -->|"无"| NoKey["❌ session=none\n每次全新会话"]
+
+    ExplicitKey --> Lookup
+    AutoKey --> Lookup
+    Lookup["🔍 sessions.get(key)\n从 cursor-sessions.json"]
     Lookup --> HasCursor{"有 cursorSessionId?"}
-    HasCursor -->|"否"| NewSession
-    HasCursor -->|"是"| Resume["spawn cursor-agent<br/>--resume cursorSessionId"]
-    NewSession --> AgentRun["cursor-agent 执行<br/>（读写 store.db）"]
-    Resume --> LoadDB["cursor-agent 从<br/>store.db 加载历史"]
-    LoadDB --> AgentRun
-    AgentRun --> Response["cursor-agent 返回<br/>session_id 事件"]
-    Response --> Save["setSession(key, cursorSessionId)<br/>持久化到 cursor-sessions.json"]
-    AgentRun --> Exit["子进程退出<br/>store.db 已更新"]
+
+    HasCursor -->|"有（历史会话）"| Resume["▶️ spawn --resume sessionId\n加载 store.db 历史"]
+    HasCursor -->|"无（首次对话）"| NewSession["🆕 spawn（无 --resume）\n创建新会话"]
+    NoKey --> NewSession
+
+    Resume --> AgentRun["🧠 cursor-agent 执行\n推理 + 工具调用"]
+    NewSession --> AgentRun
+
+    AgentRun --> Save["💾 setSession(key, newSessionId)\n持久化到磁盘"]
+    AgentRun --> Exit["📤 返回响应\n子进程退出"]
+
+    style ExplicitKey fill:#2563eb,color:#fff
+    style AutoKey fill:#7c3aed,color:#fff
+    style NoKey fill:#dc2626,color:#fff
+    style Resume fill:#059669,color:#fff
+    style NewSession fill:#ea580c,color:#fff
+    style Save fill:#0891b2,color:#fff
 ```
 
 **完整存储时序**：
@@ -644,16 +778,27 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    GWStart["Gateway 启动<br/>register() 被调用"] --> IsRunning{"isProxyRunning(port)?"}
-    IsRunning -->|"否"| NeedStart["needRestart = true"]
-    IsRunning -->|"是"| FetchHealth["GET /v1/health"]
-    FetchHealth --> CompareHash{"health.scriptHash<br/>== installedHash?"}
-    CompareHash -->|"一致"| UpToDate["日志: up-to-date"]
-    CompareHash -->|"不一致"| NeedStart
-    NeedStart --> Kill["killPortProcess(port)"]
-    Kill --> Wait["Atomics.wait 300ms"]
-    Wait --> Spawn["spawn node streaming-proxy.mjs"]
-    Spawn --> Listen["proxy 监听 :18790"]
+    GWStart(["🚀 Gateway 启动\nregister() 被调用"])
+    GWStart --> IsRunning{"isProxyRunning(port)?\ncurl /v1/health"}
+
+    IsRunning -->|"❌ 未运行"| NeedStart["needRestart = true"]
+    IsRunning -->|"✅ 运行中"| FetchHealth["GET /v1/health\n获取 scriptHash"]
+
+    FetchHealth --> CompareHash{"SHA-256 对比\nrunning vs installed"}
+    CompareHash -->|"✅ 哈希一致\n代码未变"| UpToDate["📋 日志: up-to-date\n保持运行"]
+    CompareHash -->|"❌ 哈希不同\n代码已更新"| NeedStart
+
+    NeedStart --> Kill["🔪 killPortProcess(port)\nlsof / netstat 跨平台"]
+    Kill --> Wait["⏳ Atomics.wait 300ms\n零 CPU 等待"]
+    Wait --> Spawn["🔄 spawn node streaming-proxy.mjs\n注入 CURSOR_PATH 等环境变量"]
+    Spawn --> Listen["✅ proxy 监听 :18790\n就绪"]
+
+    style GWStart fill:#0891b2,color:#fff
+    style NeedStart fill:#ea580c,color:#fff
+    style Kill fill:#dc2626,color:#fff
+    style Spawn fill:#2563eb,color:#fff
+    style Listen fill:#059669,color:#fff
+    style UpToDate fill:#059669,color:#fff
 ```
 
 ---
@@ -689,20 +834,26 @@ Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
 
 **问题**：早期设计中，服务器指令要求 LLM "首次使用工具前必须调 openclaw_skill 获取文档"，每次请求多一次工具调用（+3-5 秒）。
 
-**解决方案**：`extractSkillBrief()` 从 SKILL.md 中提取关键信息嵌入服务器指令：
+**解决方案**：三层渐进披露（Progressive Disclosure）：
+
+1. **服务器指令**（零成本）：`buildServerInstructions()` + `extractSkillBrief()` 从 SKILL.md 中提取关键信息嵌入 MCP 服务器指令，覆盖常见操作的 action、URL 模式、参数示例
+2. **能力简介**（零成本）：`buildCapabilitySummary()` 将所有工具的简介注入 `openclaw_invoke` / `openclaw_discover` 的 description，确保即使动态工具未注册也能被发现
+3. **完整文档**（按需）：`openclaw_skill` 提供完整 SKILL.md（含所有 action、参数、示例、注意事项），仅在高级操作时按需调用
 
 ```
 CAPABILITIES:
   - feishu_doc: Feishu document read/write. Token: From URL ... Actions: Read Document(`read`),
     Write Document(`write`), ... Params: pass `action` and remaining fields as `args_json` JSON string.
-    Example: { "action": "read", "doc_token": "ABC123def" }
+    Example: { "action": "read", "doc_token": "ABC123def" }. Note: Image display size is ...
 
 USAGE:
-  1. Use the token extraction rules and action keys above to call tools directly.
-  2. Call openclaw_skill for advanced operations or when unsure.
+  1. When a user mentions URLs or services matching the capabilities above, use the corresponding tool.
+  2. Use the token extraction rules and action keys above to call tools directly for common read/write operations.
+  3. Call openclaw_skill(tool_name) for advanced operations, complex parameters, or when unsure about usage.
+  4. Call openclaw_discover for a refreshed list of all available tools.
 ```
 
-效果：LLM 可以直接调用工具，仅在复杂场景才需要查阅完整文档。实测减少 1 次工具调用 + 3-5 秒思考时间。
+效果：LLM 对常见操作可以直接调用工具（读、写、追加文档等），仅在复杂场景才需要查阅完整文档。实测减少 1 次工具调用 + 3-5 秒思考时间。
 
 ### 5.4 InstantResult
 

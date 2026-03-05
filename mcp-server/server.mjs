@@ -434,6 +434,21 @@ const server = new McpServer(
   { instructions: serverInstructions },
 );
 
+// Build a concise capability summary for embedding in static tool descriptions.
+// This ensures the AI knows about available services even when only static tools are registered
+// (e.g., gateway not ready at startup → 0 dynamic tools, only openclaw_invoke/discover/skill).
+function buildCapabilitySummary() {
+  const candidateTools = getCachedCandidateTools();
+  if (candidateTools.size === 0) return "";
+  const parts = [];
+  for (const [name, meta] of candidateTools) {
+    const desc = meta.skill ? extractSkillDescription(meta.skill) : (meta.description || "");
+    if (desc) parts.push(`${name}: ${desc}`);
+  }
+  return parts.length ? ` Available: ${parts.join("; ")}.` : "";
+}
+const capSummary = buildCapabilitySummary();
+
 const registeredNames = new Set();
 
 log("info", `Starting openclaw-gateway MCP server v${VERSION}`);
@@ -506,7 +521,7 @@ for (const [name, localMeta] of verifiedTools) {
 
 server.tool(
   "openclaw_invoke",
-  "Call any OpenClaw Gateway tool by name. Use for tools not listed directly, or newly installed plugins.",
+  `Call any OpenClaw Gateway tool by name. Use for tools not listed directly, or newly installed plugins.${capSummary}`,
   {
     tool: z.string().describe("Gateway tool name"),
     action: z.string().optional().describe("Action"),
@@ -530,7 +545,7 @@ server.tool(
 
 server.tool(
   "openclaw_discover",
-  "List all available OpenClaw Gateway tools with short descriptions. Use openclaw_skill to get full documentation for a specific tool.",
+  `List all available OpenClaw Gateway tools with short descriptions. Use openclaw_skill to get full documentation for a specific tool.${capSummary}`,
   {},
   async () => {
     const candidateTools = getCachedCandidateTools(true);

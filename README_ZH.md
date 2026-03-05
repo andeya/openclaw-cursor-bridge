@@ -1,4 +1,7 @@
 <p align="center">
+  <a href="https://github.com/openclaw/openclaw"><img src="./doc/openclaw-logo.svg" width="96" height="96" alt="OpenClaw" style="vertical-align: middle"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://cursor.sh"><img src="./doc/cursor-logo.svg" width="80" height="80" alt="Cursor" style="vertical-align: middle"></a>
   <h1 align="center">openclaw-cursor-brain</h1>
   <p align="center">
     将 <a href="https://cursor.sh">Cursor</a> 作为 <a href="https://github.com/openclaw/openclaw">OpenClaw</a> 的 AI 大脑 — 原生调用所有插件工具
@@ -51,24 +54,53 @@ openclaw cursor-brain doctor    # 验证
 ## 工作原理
 
 ```mermaid
-flowchart TB
-    subgraph path1["OpenClaw → Cursor（AI 后端）"]
+flowchart LR
+    subgraph Channels ["📱 消息通道"]
         direction TB
-        User["用户消息"] --> GW["OpenClaw Gateway"]
-        GW --> Proxy["Streaming Proxy :18790"]
-        Proxy --> Agent["cursor-agent --stream-partial-output"]
-        Agent --> SSE["文本增量 → SSE 实时推送"]
+        Feishu["飞书"]
+        Slack["Slack"]
+        Web["Web / API"]
     end
 
-    subgraph path2["Cursor → OpenClaw（工具调用）"]
+    subgraph Core ["🔄 双向桥接"]
         direction TB
-        IDE["Cursor IDE"] --> MCP["MCP Server (stdio)"]
-        MCP --> REST["Gateway REST API /tools/invoke"]
-        REST --> Tools["插件工具：飞书 · Slack · GitHub · …"]
+        GW["OpenClaw\nGateway"]
+
+        subgraph ProxyBox ["⚡ Streaming Proxy :18790"]
+            Proxy["OpenAI 兼容 API\n• Session 自动推导\n• 即时结果\n• 脚本哈希自动重启"]
+        end
+
+        subgraph MCPBox ["🔌 MCP Server (stdio)"]
+            MCP["工具网关\n• 丰富描述\n• 超时 + 重试\n• 自动发现"]
+        end
     end
 
-    style Proxy fill:#2563eb,color:#fff
-    style SSE fill:#10b981,color:#fff
+    subgraph AI ["🧠 Cursor Agent"]
+        Agent["cursor-agent CLI\n--stream-partial-output\n--resume session"]
+    end
+
+    subgraph Tools ["🛠️ 插件工具"]
+        direction TB
+        T1["feishu_doc"]
+        T2["feishu_wiki"]
+        T3["GitHub · DB · …"]
+    end
+
+    Channels -->|"用户消息"| GW
+    GW -->|"POST /v1/chat/completions"| Proxy
+    Proxy -->|"spawn + stdin"| Agent
+    Agent -->|"SSE 实时流"| Proxy
+    Proxy -->|"响应"| GW
+    GW -->|"回复"| Channels
+
+    Agent <-->|"MCP stdio"| MCP
+    MCP -->|"POST /tools/invoke"| GW
+    GW --> Tools
+
+    style Proxy fill:#2563eb,color:#fff,stroke:#1d4ed8
+    style MCP fill:#7c3aed,color:#fff,stroke:#6d28d9
+    style Agent fill:#ea580c,color:#fff,stroke:#c2410c
+    style GW fill:#0891b2,color:#fff,stroke:#0e7490
 ```
 
 两条自动配置的路径：

@@ -74,21 +74,61 @@ The core design of this project is a **bidirectional bridge** — two independen
 
 ```mermaid
 flowchart LR
-    subgraph pathA ["Path A: OpenClaw -> Cursor (AI Backend)"]
-        direction LR
-        User["User Messages<br/>(Feishu/Slack/Web)"] --> GW["OpenClaw<br/>Gateway"]
-        GW -->|"POST /v1/chat/completions"| Proxy["Streaming<br/>Proxy :18790"]
-        Proxy -->|"spawn + stdin"| Agent["cursor-agent<br/>CLI"]
-        Agent -->|"stdout JSON lines"| Proxy
-        Proxy -->|"SSE stream"| GW
+    subgraph Channels ["📱 Message Channels"]
+        direction TB
+        CH1["Feishu groups/DMs"]
+        CH2["Slack channels"]
+        CH3["Web / Custom"]
     end
 
-    subgraph pathB ["Path B: Cursor -> OpenClaw (Tool Calls)"]
+    subgraph pathA ["Path A: OpenClaw → Cursor (AI Backend)"]
         direction LR
-        IDE["Cursor IDE"] -->|"stdio"| MCP["MCP Server"]
-        MCP -->|"POST /tools/invoke"| REST["Gateway<br/>REST API"]
-        REST --> Tools["Plugin Tools<br/>Feishu/Slack/GitHub/..."]
+        GW_A["OpenClaw\nGateway"]
+        subgraph ProxyDetail ["⚡ Streaming Proxy :18790"]
+            direction TB
+            API["OpenAI-compatible API"]
+            SessionMgr["Session auto-derive\n(meta → key → --resume)"]
+            API --- SessionMgr
+        end
+        Agent["🧠 cursor-agent\n-p --stream-partial-output\n--trust --approve-mcps"]
     end
+
+    subgraph pathB ["Path B: Cursor → OpenClaw (Tool Calls)"]
+        direction LR
+        subgraph MCPDetail ["🔌 MCP Server (stdio)"]
+            direction TB
+            MCPCore["Tool proxy + retry"]
+            Skills["Rich Instructions\n(extractSkillBrief)"]
+            MCPCore --- Skills
+        end
+        GW_B["Gateway\nREST API"]
+    end
+
+    subgraph Tools ["🛠️ Plugin Ecosystem"]
+        direction TB
+        T1["feishu_doc\nfeishu_wiki"]
+        T2["GitHub\nSlack"]
+        T3["Database\nCustom plugins"]
+    end
+
+    Channels -->|"User messages"| GW_A
+    GW_A -->|"POST /v1/chat/completions\n(with Conversation info metadata)"| API
+    SessionMgr -->|"spawn + stdin\n(--resume sessionId)"| Agent
+    Agent -->|"stdout: JSON lines\n(text/result/tool_call/session_id)"| API
+    API -->|"SSE real-time stream\ndata: {choices:[{delta:{content}}]}"| GW_A
+    GW_A -->|"Response"| Channels
+
+    Agent <-->|"MCP stdio\n(CallTool)"| MCPCore
+    MCPCore -->|"POST /tools/invoke\n{tool, args}"| GW_B
+    GW_B --> Tools
+
+    style API fill:#2563eb,color:#fff,stroke:#1d4ed8
+    style SessionMgr fill:#1e40af,color:#fff,stroke:#1e3a8a
+    style MCPCore fill:#7c3aed,color:#fff,stroke:#6d28d9
+    style Skills fill:#6d28d9,color:#fff,stroke:#5b21b6
+    style Agent fill:#ea580c,color:#fff,stroke:#c2410c
+    style GW_A fill:#0891b2,color:#fff,stroke:#0e7490
+    style GW_B fill:#0891b2,color:#fff,stroke:#0e7490
 ```
 
 **Path A** solves the "AI backend" problem: When OpenClaw messaging channels (Feishu groups, Slack channels, etc.) receive user messages, they are forwarded to the Streaming Proxy via the Gateway. The Proxy spawns a cursor-agent process and streams AI responses back in real-time.
@@ -99,23 +139,38 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    PluginEntry["index.ts<br/>Plugin Entry"]
-    Setup["src/setup.ts<br/>Setup & Config"]
-    Doctor["src/doctor.ts<br/>Health Checks"]
-    Cleanup["src/cleanup.ts<br/>Uninstall Cleanup"]
-    Constants["src/constants.ts<br/>Constants"]
-    MCPServer["mcp-server/server.mjs<br/>MCP Server"]
-    Proxy["mcp-server/streaming-proxy.mjs<br/>Streaming Proxy"]
+    subgraph Orchestration ["🎛️ Orchestration Layer (runs at Gateway startup)"]
+        PluginEntry["<b>index.ts</b>\nPlugin entry · register() · CLI"]
+        Setup["<b>setup.ts</b>\nCursor detection · Model discovery\nMCP config · Format probe"]
+        Doctor["<b>doctor.ts</b>\n11 health checks"]
+        Cleanup["<b>cleanup.ts</b>\n3-layer uninstall cleanup"]
+    end
+
+    subgraph Runtime ["⚙️ Runtime (long-running processes)"]
+        Proxy["<b>streaming-proxy.mjs</b>\nHTTP :18790 · Session management\nSSE stream · Tool call logs"]
+        MCPServer["<b>server.mjs</b>\nTool discovery · Rich instructions\nTimeout/retry · Cache"]
+    end
+
+    subgraph External ["🌐 External Dependencies"]
+        GW["OpenClaw Gateway\nREST API :18789"]
+        Agent["cursor-agent CLI\n--stream-partial-output"]
+        CursorIDE["Cursor IDE\n(manages MCP lifecycle)"]
+    end
 
     PluginEntry -->|"runSetup()"| Setup
-    PluginEntry -->|"startProxy()"| Proxy
+    PluginEntry -->|"startProxy()\nscriptHash check"| Proxy
     PluginEntry -->|"runDoctorChecks()"| Doctor
     PluginEntry -->|"runCleanup()"| Cleanup
-    Setup --> Constants
-    Doctor --> Constants
-    Cleanup --> Constants
-    MCPServer -->|"Gateway REST"| GatewayAPI["OpenClaw Gateway"]
-    Proxy -->|"spawn"| CursorAgent["cursor-agent CLI"]
+    Proxy -->|"spawn per request"| Agent
+    MCPServer -->|"POST /tools/invoke"| GW
+    CursorIDE -->|"stdio launch"| MCPServer
+
+    style PluginEntry fill:#0891b2,color:#fff,stroke:#0e7490
+    style Setup fill:#0891b2,color:#e0f2fe,stroke:#0e7490
+    style Proxy fill:#2563eb,color:#fff,stroke:#1d4ed8
+    style MCPServer fill:#7c3aed,color:#fff,stroke:#6d28d9
+    style Agent fill:#ea580c,color:#fff,stroke:#c2410c
+    style GW fill:#059669,color:#fff,stroke:#047857
 ```
 
 ### 2.3 Key Design Decisions
@@ -141,21 +196,32 @@ The MCP Server communicates with Cursor IDE via stdio (launched by `~/.cursor/mc
 
 ```mermaid
 flowchart TD
-    Start["register(api) called"] --> IsUninstall{"argv contains<br/>uninstall/upgrade?"}
-    IsUninstall -->|"yes"| SkipSetup["Skip setup and proxy"]
-    IsUninstall -->|"no"| RunSetup["runSetup(ctx)"]
-    RunSetup --> SyncProvider{"Provider config<br/>changed?"}
-    SyncProvider -->|"same"| LogUnchanged["Log: unchanged"]
-    SyncProvider -->|"different"| WriteConfig["writeConfigFile(patch)"]
-    WriteConfig --> CheckProxy{"Proxy<br/>running?"}
+    Start(["🚀 register(api) called"])
+    Start --> IsUninstall{"argv contains\nuninstall / upgrade?"}
+    IsUninstall -->|"yes"| SkipSetup["⏭️ Skip setup and proxy"]
+
+    IsUninstall -->|"no"| RunSetup["runSetup(ctx)\nCursor detection · Model discovery · MCP write"]
+    RunSetup --> SyncProvider{"Provider config\nchanged?"}
+    SyncProvider -->|"JSON.stringify\nsame"| LogUnchanged["📋 Log: unchanged\nskip write"]
+    SyncProvider -->|"different"| WriteConfig["💾 writeConfigFile(patch)\nSync models + agents"]
+
+    WriteConfig --> CheckProxy
     LogUnchanged --> CheckProxy
-    CheckProxy -->|"not running"| StartProxy["startProxy()"]
-    CheckProxy -->|"running"| HashCheck{"scriptHash<br/>matches?"}
-    HashCheck -->|"match"| LogUpToDate["Log: up-to-date"]
-    HashCheck -->|"mismatch"| StartProxy
-    StartProxy --> RegisterCLI["Register CLI commands"]
+    CheckProxy{"Proxy\nrunning?"}
+    CheckProxy -->|"not running"| StartProxy["🔄 startProxy()\nkill → wait → spawn"]
+    CheckProxy -->|"running"| HashCheck{"scriptHash\nmatches?"}
+    HashCheck -->|"SHA-256 match"| LogUpToDate["✅ Log: up-to-date"]
+    HashCheck -->|"hash differs\ncode updated"| StartProxy
+
+    StartProxy --> RegisterCLI["📝 Register CLI commands\nsetup · doctor · status\nupgrade · uninstall · proxy"]
     LogUpToDate --> RegisterCLI
     SkipSetup --> RegisterCLI
+
+    style Start fill:#0891b2,color:#fff
+    style RunSetup fill:#2563eb,color:#fff
+    style WriteConfig fill:#7c3aed,color:#fff
+    style StartProxy fill:#ea580c,color:#fff
+    style RegisterCLI fill:#059669,color:#fff
 ```
 
 #### Configuration Deduplication
@@ -277,51 +343,51 @@ The MCP Server is the most complex module in this project. It is responsible for
 
 ```mermaid
 flowchart TD
-    Phase1["Phase 1: discoverCandidateTools()"]
-    Phase2["Phase 2: discoverVerifiedTools()"]
-    Phase3["Phase 3: server.tool() registration"]
-
-    Phase1 -->|"Map&lt;name, meta&gt;"| Phase2
-    Phase2 -->|"Filter alive tools"| Phase3
-
-    subgraph p1 ["Phase 1: Candidate Discovery"]
-        ReadConfig["Read openclaw.json"]
-        ScanSkills["Scan SKILL.md files"]
-        ScanSource["Scan src/*.ts source"]
-        ReadConfig --> ScanSkills
-        ReadConfig --> ScanSource
+    subgraph p1 ["📂 Phase 1: Candidate Discovery (disk I/O, 60s cache)"]
+        ReadConfig["Read openclaw.json\n→ get plugin install paths"] --> ScanSkills["Scan SKILL.md\n→ tool names + full docs"]
+        ReadConfig --> ScanSource["Scan src/*.ts\n→ name/description pattern match"]
+        ScanSkills --> Merge["Merge: Map&lt;name, {skill?, desc?}&gt;"]
+        ScanSource --> Merge
     end
 
-    subgraph p2 ["Phase 2: Liveness Verification"]
-        Probe["Parallel POST /tools/invoke<br/>probe each candidate"]
-        Filter["Filter: ok || error.type != not_found"]
-        Probe --> Filter
+    subgraph p2 ["🔍 Phase 2: Liveness Verification (parallel network probe)"]
+        Probe["Promise.allSettled\nParallel POST /tools/invoke {}\nper candidate · 5s timeout"]
+        Probe --> Filter["Filter:\nok || error.type ≠ 'not_found'"]
     end
 
-    subgraph p3 ["Phase 3: MCP Registration"]
-        DynTools["Dynamic tools: feishu_doc, feishu_wiki, ..."]
-        StaticTools["Static tools: openclaw_invoke,<br/>openclaw_discover, openclaw_skill"]
+    subgraph p3 ["✅ Phase 3: MCP Registration"]
+        direction LR
+        DynTools["Dynamic tools (per-tool)\nfeishu_doc · feishu_wiki · …\n→ {action?, args_json?}"]
+        StaticTools["Built-in tools\nopenclaw_invoke\nopenclaw_discover\nopenclaw_skill"]
     end
+
+    Merge -->|"Map&lt;name, meta&gt;\nN candidates"| Probe
+    Filter -->|"M verified\n(M ≤ N)"| DynTools
+
+    style Merge fill:#2563eb,color:#fff
+    style Probe fill:#7c3aed,color:#fff
+    style Filter fill:#7c3aed,color:#fff
+    style DynTools fill:#059669,color:#fff
+    style StaticTools fill:#059669,color:#fff
 ```
 
-**Phase 1: `discoverCandidateTools()`** (L253-297)
+**Phase 1: `discoverCandidateTools()`**
 
-Scans candidate tools from two sources:
-- **SKILL.md files**: Reads each plugin's `skills/` directory, extracting tool names and skill content from frontmatter
-- **Source scanning**: Parses `name: "tool_name"` patterns in `src/*.ts` files, extracting tool names and descriptions
+Scans candidate tools from two sources (pure disk I/O, no Gateway dependency):
+- **SKILL.md files**: Reads subdirectories under each plugin's `skills/` directory, converts directory names to tool names (e.g., `feishu-doc` → `feishu_doc`), reads the full SKILL.md content (including inlined `references/*.md`)
+- **Source scanning** (fallback): Parses `name: "tool_name"` and `description: "..."` patterns in `src/*.ts` files, extracting tool names and descriptions not already covered by SKILL.md
 
-**Phase 2: `discoverVerifiedTools()`** (L313-333)
+**Phase 2: `discoverVerifiedTools()`**
 
 For each candidate tool, issues a REST probe (`POST /tools/invoke` with empty args) to confirm the tool is actually registered on the Gateway. Uses `Promise.allSettled` for parallel probing with a 5-second timeout.
 
 **Phase 3: Dynamic Registration**
 
-Verified tools are registered to the MCP Server via `server.tool(name, description, schema, handler)`. Each tool uses a unified schema of `{ action?: string, args_json?: string }`.
+Verified tools are registered to the MCP Server via `server.tool(name, description, schema, handler)`. Each tool uses a unified schema of `{ action?: string, args_json?: string }`. The description is composed from the SKILL.md frontmatter description plus a skill usage hint.
 
 #### Caching Layer
 
 ```javascript
-// server.mjs L299-311
 let _candidateCache = null;
 let _candidateCacheAt = 0;
 const CANDIDATE_TTL_MS = 60_000;
@@ -341,9 +407,9 @@ During the startup phase, `discoverCandidateTools()` is called from multiple loc
 
 #### Server Instructions Construction
 
-`buildServerInstructions()` (L402-428) generates MCP server instructions, embedded in the `McpServer`'s `instructions` field. These instructions appear in Cursor's system prompt, guiding the LLM on how to use tools.
+`buildServerInstructions()` generates MCP server instructions, embedded in the `McpServer`'s `instructions` field. These instructions appear in Cursor's system prompt, guiding the LLM on how to use tools.
 
-`extractSkillBrief()` (L355-395) extracts key information from SKILL.md:
+`extractSkillBrief()` extracts key information from SKILL.md:
 
 | Extracted Item | Source | Purpose |
 |---|---|---|
@@ -354,6 +420,25 @@ During the startup phase, `discoverCandidateTools()` is called from multiple loc
 | Dependency hints | `**Dependency:**` / `**Note:**` | LLM knows inter-tool dependencies |
 
 Once embedded in server instructions, the LLM can call tools directly, only consulting full documentation (`openclaw_skill`) for complex scenarios.
+
+#### Capability Summary Injection
+
+**Problem**: When the Gateway is slow to start or unavailable, dynamic tools cannot be registered, and the MCP Server only has 3 static tools (`openclaw_invoke`, `openclaw_discover`, `openclaw_skill`). Their descriptions don't mention any specific capabilities (e.g., Feishu documents), so the LLM won't think to use MCP when encountering a Feishu URL.
+
+**Solution**: `buildCapabilitySummary()` generates a capability overview from candidate tool metadata and appends it to the `description` of `openclaw_invoke` and `openclaw_discover`:
+
+```
+openclaw_invoke: "Call any OpenClaw Gateway tool by name...
+  Available: feishu_doc: Feishu document read/write operations.
+  Activate when user mentions Feishu docs, cloud docs, or docx links.;
+  feishu_wiki: ...; feishu_drive: ..."
+```
+
+Since candidate tools come from disk scanning (Phase 1) and don't depend on the Gateway, even when the Gateway is unavailable, the LLM can learn about available capabilities from static tool descriptions.
+
+#### Lazy-Loaded Skill Cache
+
+`getSkillsByTool()` provides skill content access independent of the Gateway. On first invocation, it extracts all skill-bearing tools from `discoverCandidateTools()` and caches them in memory. The `openclaw_skill` tool uses this function to fetch documentation on demand, without depending on the Gateway probe results at startup.
 
 #### Four Built-in Tools
 
@@ -366,7 +451,7 @@ Once embedded in server instructions, the LLM can call tools directly, only cons
 
 #### Gateway REST Calls
 
-`invokeGatewayTool()` (L65-88) implements REST calls with retry:
+`invokeGatewayTool()` implements REST calls with retry:
 
 - Timeout: 60 seconds by default (`OPENCLAW_TOOL_TIMEOUT_MS`)
 - Retry conditions: `AbortError` (timeout), `ECONNREFUSED`, `ECONNRESET`
@@ -417,15 +502,30 @@ cursor-agent outputs JSON lines via stdout, one event per line:
 
 ```mermaid
 flowchart LR
-    JSONLines["cursor-agent<br/>stdout"] --> Parse["JSON.parse<br/>each line"]
-    Parse --> Switch{"event.type"}
-    Switch -->|"tool_call"| ToolLog["Structured log<br/>tool:start/done"]
-    Switch -->|"thinking"| Thinking{"FORWARD_THINKING?"}
-    Thinking -->|"true"| ForwardThink["SSE: reasoning_content"]
-    Thinking -->|"false"| Drop["Discard"]
-    Switch -->|"text"| TextDelta["SSE: content delta"]
-    Switch -->|"result"| Store["Store resultText"]
-    Switch -->|"session_id"| SaveSession["Persist session"]
+    Input["📥 cursor-agent\nstdout JSON lines"] --> Parse["JSON.parse\nline-by-line"]
+    Parse --> Switch{"event.type?"}
+
+    Switch -->|"tool_call"| ToolBranch{"subtype?"}
+    ToolBranch -->|"started"| ToolStart["📊 tool:start log\nrecord name · params · call_id\nstart timer"]
+    ToolBranch -->|"completed"| ToolDone["📊 tool:done log\nduration · success/fail"]
+
+    Switch -->|"thinking"| ThinkBranch{"FORWARD_\nTHINKING?"}
+    ThinkBranch -->|"true"| ForwardThink["🧠 SSE:\nreasoning_content"]
+    ThinkBranch -->|"false"| Drop["🗑️ Discard"]
+
+    Switch -->|"text"| TextDelta["📝 SSE:\ncontent delta\n(real-time push)"]
+
+    Switch -->|"result"| ResultBranch{"INSTANT_\nRESULT?"}
+    ResultBranch -->|"true"| InstantSend["⚡ Send in one shot\nzero delay"]
+    ResultBranch -->|"false"| ChunkedSend["📤 Chunked stream\n~200 chars/s"]
+
+    Switch -->|"any with\nsession_id"| SaveSession["💾 setSession()\npersist to disk"]
+
+    style Input fill:#ea580c,color:#fff
+    style TextDelta fill:#2563eb,color:#fff
+    style ForwardThink fill:#7c3aed,color:#fff
+    style InstantSend fill:#059669,color:#fff
+    style SaveSession fill:#0891b2,color:#fff
 ```
 
 #### Stream vs Non-Stream
@@ -530,34 +630,51 @@ Full sequence for a "summarize Feishu document" request:
 
 ```mermaid
 sequenceDiagram
-    participant U as User (Feishu)
-    participant GW as OpenClaw Gateway
-    participant P as Streaming Proxy
-    participant A as cursor-agent
-    participant MCP as MCP Server
-    participant API as Gateway REST
+    participant U as 👤 User (Feishu)
+    participant GW as 🌐 OpenClaw Gateway
+    participant P as ⚡ Streaming Proxy
+    participant S as 💾 Session Store
+    participant A as 🧠 cursor-agent
+    participant MCP as 🔌 MCP Server
+    participant API as 🛠️ Gateway REST
 
     U->>GW: "Summarize: https://feishu.cn/docx/ABC123"
-    GW->>P: POST /v1/chat/completions<br/>(stream: true)
-    P->>A: spawn cursor-agent -p --stream-partial-output
+    GW->>P: POST /v1/chat/completions (stream: true)
+    Note over GW,P: Request body contains Conversation info metadata<br/>(sender_id, group_channel...)
+
+    rect rgb(219, 234, 254)
+        Note over P,S: Session auto-derive
+        P->>P: extractSessionFromMeta()<br/>→ auto:dm:ou_xxx
+        P->>S: sessions.get("auto:dm:ou_xxx")
+        S-->>P: cursorSessionId = "abc-def"
+    end
+
+    P->>A: spawn cursor-agent -p --resume abc-def
     Note over P,A: stdin: user message
 
-    A->>A: LLM thinks: identify Feishu URL
-
-    A->>MCP: tool_call: feishu_doc(read, ABC123)
-    MCP->>API: POST /tools/invoke
-    API-->>MCP: Document content
-    MCP-->>A: Tool result
-
-    Note over P: tool:start feishu_doc (log)
-    Note over P: tool:done feishu_doc 433ms (log)
+    rect rgb(254, 243, 199)
+        Note over A,API: Tool invocation (on demand)
+        A->>A: LLM thinks: identify Feishu URL → call feishu_doc
+        A->>MCP: tool_call: feishu_doc(read, ABC123)
+        Note over P: 📊 tool:start feishu_doc
+        MCP->>API: POST /tools/invoke {tool, args}
+        API-->>MCP: Document content (3.2KB)
+        MCP-->>A: Tool result
+        Note over P: 📊 tool:done feishu_doc 433ms ✓
+    end
 
     A->>A: LLM generates summary
+    A-->>P: stdout: {type:"result", result:"This document introduces..."}
+    A-->>P: stdout: {session_id: "abc-def-new"}
 
-    A-->>P: result: "This document introduces..."
-    P-->>GW: SSE: data: {"choices":[{"delta":{"content":"..."}}]}
-    P-->>GW: data: [DONE]
-    GW-->>U: Summary content
+    rect rgb(220, 252, 231)
+        Note over P: Response + persist
+        P->>S: setSession("auto:dm:ou_xxx", "abc-def-new")
+        P-->>GW: SSE: data: {"choices":[{"delta":{"content":"..."}}]}
+        P-->>GW: data: [DONE]
+    end
+
+    GW-->>U: 📝 Summary content
 ```
 
 ### 4.2 Tool Invocation Path
@@ -593,19 +710,36 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    Req["New request arrives"] --> Resolve["resolveSessionKey()<br/>body / header / meta"]
-    Resolve --> HasKey{"Has session key?"}
-    HasKey -->|"no"| NewSession["spawn cursor-agent<br/>(no --resume)"]
-    HasKey -->|"yes"| Lookup["sessions.get(key)<br/>from cursor-sessions.json"]
+    Req(["📨 New request arrives"])
+    Req --> ExplicitCheck{"body/header has\nexplicit session ID?"}
+
+    ExplicitCheck -->|"_openclaw_session_id\nsession_id\nX-OpenClaw-Session-Id\nX-Session-Id"| ExplicitKey["✅ Use explicit key"]
+    ExplicitCheck -->|"none"| MetaCheck{"Message has\nConversation info?"}
+
+    MetaCheck -->|"has sender_id\nor group_channel"| AutoKey["🔄 Auto-derive key\nauto:dm:{sender_id}\nauto:grp:{channel}:{topic}"]
+    MetaCheck -->|"none"| NoKey["❌ session=none\nfresh session each time"]
+
+    ExplicitKey --> Lookup
+    AutoKey --> Lookup
+    Lookup["🔍 sessions.get(key)\nfrom cursor-sessions.json"]
     Lookup --> HasCursor{"Has cursorSessionId?"}
-    HasCursor -->|"no"| NewSession
-    HasCursor -->|"yes"| Resume["spawn cursor-agent<br/>--resume cursorSessionId"]
-    NewSession --> AgentRun["cursor-agent executes<br/>(reads/writes store.db)"]
-    Resume --> LoadDB["cursor-agent loads<br/>history from store.db"]
-    LoadDB --> AgentRun
-    AgentRun --> Response["cursor-agent returns<br/>session_id event"]
-    Response --> Save["setSession(key, cursorSessionId)<br/>persist to cursor-sessions.json"]
-    AgentRun --> Exit["Child process exits<br/>store.db updated"]
+
+    HasCursor -->|"yes (existing session)"| Resume["▶️ spawn --resume sessionId\nload store.db history"]
+    HasCursor -->|"no (first turn)"| NewSession["🆕 spawn (no --resume)\ncreate new session"]
+    NoKey --> NewSession
+
+    Resume --> AgentRun["🧠 cursor-agent executes\nreasoning + tool calls"]
+    NewSession --> AgentRun
+
+    AgentRun --> Save["💾 setSession(key, newSessionId)\npersist to disk"]
+    AgentRun --> Exit["📤 Return response\nchild process exits"]
+
+    style ExplicitKey fill:#2563eb,color:#fff
+    style AutoKey fill:#7c3aed,color:#fff
+    style NoKey fill:#dc2626,color:#fff
+    style Resume fill:#059669,color:#fff
+    style NewSession fill:#ea580c,color:#fff
+    style Save fill:#0891b2,color:#fff
 ```
 
 **Full storage sequence**:
@@ -644,16 +778,27 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    GWStart["Gateway starts<br/>register() called"] --> IsRunning{"isProxyRunning(port)?"}
-    IsRunning -->|"no"| NeedStart["needRestart = true"]
-    IsRunning -->|"yes"| FetchHealth["GET /v1/health"]
-    FetchHealth --> CompareHash{"health.scriptHash<br/>== installedHash?"}
-    CompareHash -->|"match"| UpToDate["Log: up-to-date"]
-    CompareHash -->|"mismatch"| NeedStart
-    NeedStart --> Kill["killPortProcess(port)"]
-    Kill --> Wait["Atomics.wait 300ms"]
-    Wait --> Spawn["spawn node streaming-proxy.mjs"]
-    Spawn --> Listen["proxy listening :18790"]
+    GWStart(["🚀 Gateway starts\nregister() called"])
+    GWStart --> IsRunning{"isProxyRunning(port)?\ncurl /v1/health"}
+
+    IsRunning -->|"❌ not running"| NeedStart["needRestart = true"]
+    IsRunning -->|"✅ running"| FetchHealth["GET /v1/health\nget scriptHash"]
+
+    FetchHealth --> CompareHash{"SHA-256 compare\nrunning vs installed"}
+    CompareHash -->|"✅ hash match\ncode unchanged"| UpToDate["📋 Log: up-to-date\nkeep running"]
+    CompareHash -->|"❌ hash differs\ncode updated"| NeedStart
+
+    NeedStart --> Kill["🔪 killPortProcess(port)\nlsof / netstat cross-platform"]
+    Kill --> Wait["⏳ Atomics.wait 300ms\nzero CPU wait"]
+    Wait --> Spawn["🔄 spawn node streaming-proxy.mjs\ninject CURSOR_PATH etc env vars"]
+    Spawn --> Listen["✅ proxy listening :18790\nready"]
+
+    style GWStart fill:#0891b2,color:#fff
+    style NeedStart fill:#ea580c,color:#fff
+    style Kill fill:#dc2626,color:#fff
+    style Spawn fill:#2563eb,color:#fff
+    style Listen fill:#059669,color:#fff
+    style UpToDate fill:#059669,color:#fff
 ```
 
 ---
@@ -689,20 +834,26 @@ Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
 
 **Problem**: In the early design, server instructions required the LLM to "call openclaw_skill before first using any tool", adding an extra tool call per request (+3-5 seconds).
 
-**Solution**: `extractSkillBrief()` extracts key information from SKILL.md and embeds it in server instructions:
+**Solution**: Three-layer Progressive Disclosure:
+
+1. **Server instructions** (zero cost): `buildServerInstructions()` + `extractSkillBrief()` extract key information from SKILL.md and embed it in MCP server instructions, covering common operation actions, URL patterns, and parameter examples
+2. **Capability summary** (zero cost): `buildCapabilitySummary()` injects an overview of all tools into the `description` of `openclaw_invoke` / `openclaw_discover`, ensuring tools are discoverable even when dynamic tools aren't registered
+3. **Full documentation** (on demand): `openclaw_skill` provides complete SKILL.md (all actions, parameters, examples, caveats), invoked only for advanced operations
 
 ```
 CAPABILITIES:
   - feishu_doc: Feishu document read/write. Token: From URL ... Actions: Read Document(`read`),
     Write Document(`write`), ... Params: pass `action` and remaining fields as `args_json` JSON string.
-    Example: { "action": "read", "doc_token": "ABC123def" }
+    Example: { "action": "read", "doc_token": "ABC123def" }. Note: Image display size is ...
 
 USAGE:
-  1. Use the token extraction rules and action keys above to call tools directly.
-  2. Call openclaw_skill for advanced operations or when unsure.
+  1. When a user mentions URLs or services matching the capabilities above, use the corresponding tool.
+  2. Use the token extraction rules and action keys above to call tools directly for common read/write operations.
+  3. Call openclaw_skill(tool_name) for advanced operations, complex parameters, or when unsure about usage.
+  4. Call openclaw_discover for a refreshed list of all available tools.
 ```
 
-Result: The LLM can call tools directly, only consulting full documentation for complex scenarios. Measured reduction: 1 fewer tool call + 3-5 seconds thinking time saved.
+Result: The LLM can call tools directly for common operations (read, write, append documents, etc.), only consulting full documentation for complex scenarios. Measured reduction: 1 fewer tool call + 3-5 seconds thinking time saved.
 
 ### 5.4 InstantResult
 
