@@ -11,7 +11,7 @@
     <a href="https://nodejs.org"><img src="https://img.shields.io/badge/Node.js-%3E%3D18-green.svg" alt="Node.js >= 18"></a>
     <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
     <br/>
-    <a href="./README.md">English</a> | 中文
+    <a href="./README.md">English</a> | 中文 · <a href="./doc/technical-guide-zh.md">技术设计文档</a> · <a href="./doc/technical-guide-en.md">Technical Guide</a>
   </p>
 </p>
 
@@ -73,10 +73,10 @@ flowchart TB
 
 两条自动配置的路径：
 
-1. **Streaming Proxy** — 本地 OpenAI 兼容服务器（`/v1/chat/completions`）启动 `cursor-agent`，通过 `--stream-partial-output` 实时推送文本增量
-2. **MCP Server** — Cursor IDE 通过 stdio 调用 OpenClaw 工具，转发到 Gateway REST API（带超时/重试）
+1. **Streaming Proxy** — 本地 OpenAI 兼容服务器（`/v1/chat/completions`）启动 `cursor-agent`，通过 `--stream-partial-output` 实时推送文本增量。包含工具调用日志、批量结果即时发送、可选推理过程转发、脚本哈希自动重启。
+2. **MCP Server** — Cursor IDE 通过 stdio 调用 OpenClaw 工具，转发到 Gateway REST API（带超时/重试）。服务器指令包含丰富的工具描述（token 提取规则、action 键、参数示例），减少不必要的 `openclaw_skill` 调用。
 
-会话持久化到磁盘，通过 `--resume` 复用（重启不丢上下文）。新插件重启 Gateway 后自动发现。
+会话自动从消息元数据中推导 session key（如 `sender_id` 用于私聊，`group_channel` + `topic_id` 用于群聊），持久化到磁盘，通过 `--resume` 复用（重启不丢上下文）。也支持通过 body 字段（`_openclaw_session_id`、`session_id`）或 HTTP 头（`X-OpenClaw-Session-Id`、`X-Session-Id`）显式传递。新插件重启 Gateway 后自动发现。
 
 ## 双向增强
 
@@ -89,14 +89,20 @@ flowchart TB
 - **零配置** — 安装重启即可，一切自动配置
 - **交互式模型选择** — `setup`/`upgrade` 通过 `@clack/prompts` 展示所有发现的模型（主模型单选，备用模型按顺序多选）
 - **动态模型发现** — 自动从 `cursor-agent --list-models` 获取模型列表，每次 Gateway 启动时同步
-- **实时流式** — `--stream-partial-output` 逐字输出；批量结果智能分块（~200 字符/秒，可配置）
-- **工具自动发现** — 源码扫描 + REST API 并行验证
-- **会话持久化** — cursor-agent 会话持久化到磁盘（`~/.openclaw/cursor-sessions.json`），proxy/Gateway 重启不丢失上下文；`--resume` 自动恢复
+- **实时流式** — `--stream-partial-output` 逐字输出；批量结果默认即时发送（`CURSOR_PROXY_INSTANT_RESULT=true`），可选智能分块回退
+- **推理过程转发** — 可选通过 `reasoning_content` 流式输出 LLM 推理过程（`CURSOR_PROXY_FORWARD_THINKING=true`）
+- **丰富工具描述** — MCP 服务器指令包含 token 提取规则、精确 action 键和参数示例（来自 SKILL.md），减少不必要的 `openclaw_skill` 调用
+- **工具调用日志** — proxy 记录每个工具调用的名称、参数摘要、耗时和 call ID，便于诊断
+- **工具自动发现** — 源码扫描 + REST API 并行验证；60s TTL 缓存
+- **Session 自动推导** — 自动从消息元数据（sender/group/topic）推导 session key，Gateway 无需显式传递 session ID
+- **会话持久化** — cursor-agent 会话持久化到磁盘（`~/.openclaw/cursor-sessions.json`）；也支持通过 body 字段或 HTTP 头（`X-OpenClaw-Session-Id`、`X-Session-Id`）显式传递
+- **升级自动重启** — proxy 在 `/v1/health` 暴露 `scriptHash`；Gateway 比较哈希值，代码变更后自动重启
 - **独立代理** — `streaming-proxy.mjs` 可独立运行为 OpenAI 兼容 API（自动检测、API Key、CORS）
 - **可靠性** — 工具调用超时（60s）、重试（2 次）、结构化错误（`isError: true`）
+- **请求安全** — 请求体大小限制（10 MB）、单请求超时、客户端断连优雅处理
 - **代理管理** — `proxy status/stop/restart/log` 命令独立管控代理生命周期，无需重启 Gateway
 - **诊断** — `doctor`（10+ 检查项）、`status` 和 `proxy log` 命令
-- **跨平台** — macOS、Linux、Windows
+- **跨平台** — macOS、Linux、Windows（端口管理、健康检查）
 
 ## 配置
 
@@ -118,7 +124,9 @@ flowchart TB
 |---|---|---|
 | `OPENCLAW_TOOL_TIMEOUT_MS` | `60000` | 工具调用超时（毫秒） |
 | `OPENCLAW_TOOL_RETRY_COUNT` | `2` | 瞬态错误重试次数 |
-| `CURSOR_PROXY_STREAM_SPEED` | `200` | 分块流式速度（字符/秒） |
+| `CURSOR_PROXY_INSTANT_RESULT` | `true` | 批量结果即时发送（不分块模拟流式） |
+| `CURSOR_PROXY_FORWARD_THINKING` | `false` | 将 LLM 推理过程转发为 `reasoning_content` |
+| `CURSOR_PROXY_STREAM_SPEED` | `200` | 分块流式速度（字符/秒，仅 `INSTANT_RESULT=false` 时） |
 | `CURSOR_PROXY_REQUEST_TIMEOUT` | `300000` | 单请求超时（毫秒，默认 5 分钟） |
 | `CURSOR_PROXY_API_KEY` | *（无）* | 独立模式 API Key 认证 |
 
@@ -154,7 +162,7 @@ curl http://127.0.0.1:18790/v1/chat/completions \
   -d '{"model":"auto","stream":true,"messages":[{"role":"user","content":"你好！"}]}'
 ```
 
-端点：`POST /v1/chat/completions`、`GET /v1/models`、`GET /v1/health`。支持 API Key 认证、CORS、会话复用。
+端点：`POST /v1/chat/completions`、`GET /v1/models`、`GET /v1/health`（返回 `scriptHash` 用于版本检测）。支持 API Key 认证、CORS、会话自动推导与复用。
 
 <details>
 <summary><strong>自动配置的文件</strong></summary>
@@ -217,7 +225,11 @@ curl http://127.0.0.1:18790/v1/chat/completions \
 | 工具未出现 | 重启 Gateway，在 Cursor 中调用 `openclaw_discover` |
 | 工具超时 | 设置 `OPENCLAW_TOOL_TIMEOUT_MS=120000` |
 | Proxy 未启动 | `openclaw cursor-brain proxy log` 查看日志；`proxy restart` 强制启动 |
+| 升级后 Proxy 未更新 | Gateway 自动检测 `scriptHash` 变化并重启；用 `curl http://127.0.0.1:18790/v1/health` 验证 |
+| 消息间上下文丢失 | 查看 `cursor-proxy.log` 中 `session=auto:dm:…(meta.auto)` — 若为 `none(none)` 说明消息中未嵌入元数据 |
 | 重启后上下文丢失 | 会话已自动持久化；用 `proxy restart`（而非 `gateway restart`）可保留会话 |
+| 批量响应延迟 | `CURSOR_PROXY_INSTANT_RESULT` 默认 `true`；若设为 `false` 则按 ~200 字符/秒分块 |
+| 调试工具调用 | 查看 `~/.openclaw/cursor-proxy.log` 中 `tool:start` / `tool:done` 条目 |
 | 调试 MCP | `OPENCLAW_GATEWAY_URL=... node mcp-server/server.mjs` |
 
 </details>

@@ -1,6 +1,7 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 import { existsSync, readFileSync, writeFileSync, rmSync, realpathSync } from "fs";
+import { createHash } from "crypto";
 import { join } from "path";
 import { homedir } from "os";
 import { execSync, spawn } from "child_process";
@@ -24,6 +25,13 @@ function loadClack() {
 
 function isProxyRunning(port: number): boolean {
   try {
+    if (process.platform === "win32") {
+      const script = `fetch("http://127.0.0.1:${port}/v1/health").then(r=>process.stdout.write(r.ok?"1":"0")).catch(()=>process.stdout.write("0"))`;
+      const out = execSync(`node -e "${script}"`, {
+        encoding: "utf-8", timeout: 5000, stdio: ["pipe", "pipe", "pipe"],
+      });
+      return out.trim() === "1";
+    }
     execSync(`curl -sf http://127.0.0.1:${port}/v1/health`, {
       timeout: 3000, stdio: ["pipe", "pipe", "pipe"],
     });
@@ -35,13 +43,30 @@ function isProxyRunning(port: number): boolean {
 
 function killPortProcess(port: number) {
   try {
-    const out = execSync(`lsof -ti :${port}`, { encoding: "utf-8", timeout: 3000, stdio: ["pipe", "pipe", "pipe"] }).trim();
-    if (out) {
-      for (const pid of out.split("\n")) {
-        try { process.kill(parseInt(pid, 10), "SIGTERM"); } catch {}
+    if (process.platform === "win32") {
+      const out = execSync(`netstat -ano | findstr :${port} | findstr LISTENING`, {
+        encoding: "utf-8", timeout: 5000, stdio: ["pipe", "pipe", "pipe"],
+      }).trim();
+      const pids = new Set(out.split("\n").map(l => l.trim().split(/\s+/).pop()).filter(Boolean));
+      for (const pid of pids) {
+        try { process.kill(parseInt(pid!, 10), "SIGTERM"); } catch {}
+      }
+    } else {
+      const out = execSync(`lsof -ti :${port}`, { encoding: "utf-8", timeout: 3000, stdio: ["pipe", "pipe", "pipe"] }).trim();
+      if (out) {
+        for (const pid of out.split("\n")) {
+          try { process.kill(parseInt(pid, 10), "SIGTERM"); } catch {}
+        }
       }
     }
   } catch {}
+}
+
+function computeFileHash(filePath: string): string {
+  try {
+    const content = readFileSync(filePath, "utf-8");
+    return createHash("sha256").update(content).digest("hex").slice(0, 12);
+  } catch { return "unknown"; }
 }
 
 function startProxy(opts: { pluginDir: string; cursorPath: string; workspaceDir: string; port: number; outputFormat: OutputFormat; cursorModel: string; logger: any }) {
@@ -54,7 +79,7 @@ function startProxy(opts: { pluginDir: string; cursorPath: string; workspaceDir:
   }
 
   killPortProcess(opts.port);
-  try { execSync("sleep 0.3", { timeout: 1000, stdio: "ignore" }); } catch {}
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
 
   proxyChild = spawn("node", [proxyScript], {
     env: {
@@ -220,46 +245,76 @@ const plugin = {
 
       if (result.cursorPath) {
         try {
-          const patch: Record<string, unknown> = {
-            ...config,
-            models: {
-              ...((config as any).models || {}),
-              mode: "merge",
-              providers: {
-                ...existingProviders,
-                [PROVIDER_ID]: buildProviderConfig(proxyPort, discovered),
-              },
-            },
-          };
+          const newProviderConfig = buildProviderConfig(proxyPort, discovered);
+          const existingProvider = existingProviders[PROVIDER_ID];
+          const providerUnchanged = existingProvider &&
+            JSON.stringify(existingProvider) === JSON.stringify(newProviderConfig);
 
-          if (!providerExists) {
-            const hasModel = (id: string) => discovered.some((m) => m.id === id);
-            const primary = (pluginConfig.model as string) || (hasModel("sonnet-4.6") ? "sonnet-4.6" : discovered[0]?.id || "auto");
-            const fallbacks = discovered.filter((m) => m.id !== primary).map((m) => `${PROVIDER_ID}/${m.id}`);
-            (patch as any).agents = {
-              ...(config.agents || {}),
-              defaults: {
-                ...((config.agents as any)?.defaults || {}),
-                model: {
-                  primary: `${PROVIDER_ID}/${primary}`,
-                  fallbacks,
+          if (providerUnchanged && providerExists) {
+            api.logger.info(`Provider "${PROVIDER_ID}" unchanged (${discovered.length} models, port ${proxyPort})`);
+          } else {
+            const patch: Record<string, unknown> = {
+              ...config,
+              models: {
+                ...((config as any).models || {}),
+                mode: "merge",
+                providers: {
+                  ...existingProviders,
+                  [PROVIDER_ID]: newProviderConfig,
                 },
               },
             };
-          }
 
-          api.runtime.config.writeConfigFile(patch as any).then(() => {
-            api.logger.info(`Provider "${PROVIDER_ID}" synced (${discovered.length} models, port ${proxyPort})`);
-          }).catch((err: any) => {
-            api.logger.warn(`Could not write config: ${err.message}`);
-          });
+            if (!providerExists) {
+              const hasModel = (id: string) => discovered.some((m) => m.id === id);
+              const primary = (pluginConfig.model as string) || (hasModel("sonnet-4.6") ? "sonnet-4.6" : discovered[0]?.id || "auto");
+              const fallbacks = discovered.filter((m) => m.id !== primary).map((m) => `${PROVIDER_ID}/${m.id}`);
+              (patch as any).agents = {
+                ...(config.agents || {}),
+                defaults: {
+                  ...((config.agents as any)?.defaults || {}),
+                  model: {
+                    primary: `${PROVIDER_ID}/${primary}`,
+                    fallbacks,
+                  },
+                },
+              };
+            }
+
+            api.runtime.config.writeConfigFile(patch as any).then(() => {
+              api.logger.info(`Provider "${PROVIDER_ID}" synced (${discovered.length} models, port ${proxyPort})`);
+            }).catch((err: any) => {
+              api.logger.warn(`Could not write config: ${err.message}`);
+            });
+          }
         } catch (e: any) {
           api.logger.warn(`Could not auto-configure: ${e.message}`);
         }
       }
 
       if (result.cursorPath && !isProxyCmd) {
-        if (!isProxyRunning(proxyPort)) {
+        const proxyRunning = isProxyRunning(proxyPort);
+        let needRestart = !proxyRunning;
+
+        if (proxyRunning) {
+          try {
+            const healthCmd = process.platform === "win32"
+              ? `node -e "fetch('http://127.0.0.1:${proxyPort}/v1/health').then(r=>r.text()).then(t=>process.stdout.write(t)).catch(()=>process.stdout.write('{}'))"`
+              : `curl -sf http://127.0.0.1:${proxyPort}/v1/health`;
+            const raw = execSync(healthCmd, { encoding: "utf-8", timeout: 3000, stdio: ["pipe", "pipe", "pipe"] });
+            const health = JSON.parse(raw);
+            const proxyScript = join(pluginDir, "mcp-server", "streaming-proxy.mjs");
+            const installedHash = computeFileHash(proxyScript);
+            if (health.scriptHash !== installedHash) {
+              api.logger.info(`Proxy script changed (running=${health.scriptHash}, installed=${installedHash}), restarting...`);
+              needRestart = true;
+            }
+          } catch {
+            needRestart = true;
+          }
+        }
+
+        if (needRestart) {
           startProxy({
             pluginDir,
             cursorPath: result.cursorPath,
@@ -270,7 +325,7 @@ const plugin = {
             logger: api.logger,
           });
         } else {
-          api.logger.info(`Streaming proxy already running on port ${proxyPort}`);
+          api.logger.info(`Streaming proxy up-to-date on port ${proxyPort}`);
         }
       }
     }
@@ -484,7 +539,16 @@ const plugin = {
 
           s.start("Discovering models...");
           const cursorPath = detectCursorPath(pluginConfig.cursorPath as string | undefined);
-          const models = cursorPath ? discoverCursorModels(cursorPath) : [];
+          if (!cursorPath) {
+            s.stop("cursor-agent not found");
+            clack.log.warn("Could not find cursor-agent binary. Ensure Cursor IDE is installed.");
+          }
+          const upgradeLogger = {
+            info: (_msg: string) => {},
+            warn: (msg: string) => clack.log.warn(msg),
+            error: (msg: string) => clack.log.error(msg),
+          };
+          const models = cursorPath ? discoverCursorModels(cursorPath, upgradeLogger) : [];
           s.stop(`Found ${models.length} models`);
 
           const currentModel = (config.agents as any)?.defaults?.model;
@@ -516,14 +580,24 @@ const plugin = {
           let pid = "";
           let sessions = "";
           try {
-            const raw = execSync(`curl -sf http://127.0.0.1:${proxyPort}/v1/health`, { encoding: "utf-8", timeout: 3000, stdio: ["pipe", "pipe", "pipe"] });
+            const healthCmd = process.platform === "win32"
+              ? `node -e "fetch('http://127.0.0.1:${proxyPort}/v1/health').then(r=>r.text()).then(t=>process.stdout.write(t)).catch(()=>process.stdout.write('{}'))"`
+              : `curl -sf http://127.0.0.1:${proxyPort}/v1/health`;
+            const raw = execSync(healthCmd, { encoding: "utf-8", timeout: 5000, stdio: ["pipe", "pipe", "pipe"] });
             const health = JSON.parse(raw);
             up = health.status === "ok";
             sessions = String(health.sessions ?? "?");
           } catch {}
           if (up) {
             try {
-              pid = execSync(`lsof -ti :${proxyPort}`, { encoding: "utf-8", timeout: 3000, stdio: ["pipe", "pipe", "pipe"] }).trim().split("\n")[0] || "";
+              if (process.platform === "win32") {
+                const out = execSync(`netstat -ano | findstr :${proxyPort} | findstr LISTENING`, {
+                  encoding: "utf-8", timeout: 5000, stdio: ["pipe", "pipe", "pipe"],
+                }).trim();
+                pid = out.split("\n")[0]?.trim().split(/\s+/).pop() || "";
+              } else {
+                pid = execSync(`lsof -ti :${proxyPort}`, { encoding: "utf-8", timeout: 3000, stdio: ["pipe", "pipe", "pipe"] }).trim().split("\n")[0] || "";
+              }
             } catch {}
           }
           console.log("Streaming Proxy Status\n");

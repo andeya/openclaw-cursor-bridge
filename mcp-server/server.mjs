@@ -101,24 +101,132 @@ async function probeToolExists(name) {
 // ── Gateway tool metadata ───────────────────────────────────────────────────
 
 async function fetchToolDescriptions() {
+  const endpoints = [
+    `${GATEWAY_URL}/api/tools`,
+    `${GATEWAY_URL}/tools`,
+  ];
+  for (const url of endpoints) {
+    try {
+      const resp = await fetch(url, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${GATEWAY_TOKEN}`,
+          Accept: "application/json",
+        },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!resp.ok) continue;
+      const contentType = resp.headers.get("content-type") || "";
+      if (!contentType.includes("json")) continue;
+      const data = await resp.json();
+      const map = {};
+      const tools = data.tools || data.result || data;
+      if (Array.isArray(tools)) {
+        for (const t of tools) {
+          if (t.name) map[t.name] = { description: t.description || "", parameters: t.parameters || null };
+        }
+      }
+      if (Object.keys(map).length > 0) return map;
+    } catch {
+      /* try next endpoint */
+    }
+  }
+  return {};
+}
+
+// ── Plugin skill & metadata extraction ──────────────────────────────────────
+
+/**
+ * Read SKILL.md files from a plugin's skills directories.
+ * Skills are the authoritative, human/AI-readable documentation for tools.
+ *
+ * Returns: Map<toolName, skillContent>
+ *   toolName is derived from the skill directory name (e.g., "feishu-doc" → "feishu_doc").
+ */
+function readPluginSkills(installPath) {
+  /** @type {Map<string, string>} */
+  const skills = new Map();
   try {
-    const resp = await fetch(`${GATEWAY_URL}/tools`, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${GATEWAY_TOKEN}` },
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!resp.ok) return {};
-    const data = await resp.json();
-    const map = {};
-    const tools = data.tools || data.result || data;
-    if (Array.isArray(tools)) {
-      for (const t of tools) {
-        if (t.name) map[t.name] = { description: t.description || "", parameters: t.parameters || null };
+    const pluginJsonPath = join(installPath, "openclaw.plugin.json");
+    if (!existsSync(pluginJsonPath)) return skills;
+    const pluginJson = JSON.parse(readFileSync(pluginJsonPath, "utf-8"));
+    const skillDirs = pluginJson.skills || [];
+
+    for (const relDir of skillDirs) {
+      const skillsRoot = join(installPath, relDir);
+      if (!existsSync(skillsRoot)) continue;
+
+      let entries;
+      try { entries = readdirSync(skillsRoot, { withFileTypes: true }); } catch { continue; }
+
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const skillDir = join(skillsRoot, entry.name);
+        const skillFile = join(skillDir, "SKILL.md");
+        if (!existsSync(skillFile)) continue;
+
+        let content = readFileSync(skillFile, "utf-8");
+
+        // Also inline reference files from the same skill directory
+        const refsDir = join(skillDir, "references");
+        if (existsSync(refsDir)) {
+          try {
+            const refFiles = readdirSync(refsDir).filter((f) => f.endsWith(".md"));
+            for (const rf of refFiles) {
+              const refContent = readFileSync(join(refsDir, rf), "utf-8");
+              content += `\n\n---\n\n${refContent}`;
+            }
+          } catch { /* ignore */ }
+        }
+
+        // Map skill directory name to tool name: "feishu-doc" → "feishu_doc"
+        const toolName = entry.name.replace(/-/g, "_");
+        skills.set(toolName, content);
       }
     }
-    return map;
+  } catch { /* ignore */ }
+  return skills;
+}
+
+/**
+ * Extract tool metadata (name + description) from a plugin source file.
+ * Lightweight fallback for tools without SKILL.md files.
+ *
+ * Returns: Array<{ name: string, description: string }>
+ */
+function extractToolMetaFromSource(filePath) {
+  try {
+    const lines = readFileSync(filePath, "utf-8").split("\n");
+    const tools = [];
+    for (let i = 0; i < lines.length; i++) {
+      const trimmed = lines[i].trim();
+      if (!trimmed.startsWith("name:") && !trimmed.startsWith('"name"')) continue;
+      const nameMatch = trimmed.match(/^(?:name|"name")\s*:\s*['"]([a-zA-Z_]\w{2,})['"]/);
+      if (!nameMatch) continue;
+
+      const name = nameMatch[1];
+      let description = "";
+
+      // Scan nearby lines (up to 5 after name) for description field
+      for (let j = i + 1; j < Math.min(i + 6, lines.length); j++) {
+        const descLine = lines[j].trim();
+        if (!descLine.startsWith("description:") && !descLine.startsWith('"description"')) continue;
+        const descMatch = descLine.match(/^(?:description|"description")\s*:\s*['"](.+?)['"]/);
+        if (descMatch) description = descMatch[1];
+        else {
+          // Multi-line string: description:\n  "text"
+          const nextLine = (lines[j + 1] || "").trim();
+          const nextMatch = nextLine.match(/^['"](.+?)['"]/);
+          if (nextMatch) description = nextMatch[1];
+        }
+        break;
+      }
+
+      tools.push({ name, description });
+    }
+    return tools;
   } catch {
-    return {};
+    return [];
   }
 }
 
@@ -132,95 +240,244 @@ function readOpenClawConfig() {
   }
 }
 
-function extractToolNamesFromSource(filePath) {
-  try {
-    const content = readFileSync(filePath, "utf-8");
-    const names = [];
-    for (const line of content.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("name:") && !trimmed.startsWith('"name"')) continue;
-      const match = trimmed.match(/^(?:name|"name")\s*:\s*['"]([a-zA-Z_]\w{2,})['"]/);
-      if (match) names.push(match[1]);
-    }
-    return names;
-  } catch {
-    return [];
-  }
-}
-
-function discoverCandidateToolNames() {
+/**
+ * Discover candidate tools with rich metadata.
+ *
+ * Strategy:
+ *   1. Read SKILL.md files from plugin skills directories (authoritative source)
+ *   2. Scan plugin source files for tool names (catches tools without skills)
+ *   3. Merge: tools with skills get full skill content; others get name only
+ *
+ * Returns: Map<toolName, { skill?: string, description?: string }>
+ */
+function discoverCandidateTools() {
   const config = readOpenClawConfig();
-  if (!config) return [];
+  if (!config) return new Map();
 
   const installs = config.plugins?.installs || {};
-  const candidates = new Set();
+  /** @type {Map<string, { skill?: string, description?: string }>} */
+  const toolsMap = new Map();
 
   for (const [, info] of Object.entries(installs)) {
-    const installPath = (info).installPath;
+    const installPath = info.installPath;
     if (!installPath || !existsSync(installPath)) continue;
 
+    // Step 1: Read skill files (primary, reliable source)
+    const skills = readPluginSkills(installPath);
+    for (const [toolName, skillContent] of skills) {
+      toolsMap.set(toolName, { skill: skillContent });
+    }
+
+    // Step 2: Scan source files for tool names not covered by skills
     const srcDir = join(installPath, "src");
     if (!existsSync(srcDir)) continue;
 
     let files;
     try {
       files = readdirSync(srcDir).filter(
-        (f) => f.endsWith(".ts") && !f.includes(".test.") && !f.includes(".d.ts")
+        (f) => f.endsWith(".ts") && !f.includes(".test.") && !f.includes(".d.ts"),
       );
     } catch {
       continue;
     }
 
     for (const file of files) {
-      const names = extractToolNamesFromSource(join(srcDir, file));
-      for (const name of names) candidates.add(name);
+      const metas = extractToolMetaFromSource(join(srcDir, file));
+      for (const { name, description } of metas) {
+        if (!toolsMap.has(name)) {
+          toolsMap.set(name, { description: description || name });
+        }
+      }
     }
   }
 
-  return [...candidates];
+  return toolsMap;
 }
 
-async function discoverVerifiedTools() {
-  const candidates = discoverCandidateToolNames();
+// ── Candidate tools cache (avoids repeated disk reads during startup) ────────
+
+let _candidateCache = null;
+let _candidateCacheAt = 0;
+const CANDIDATE_TTL_MS = 60_000;
+
+function getCachedCandidateTools(forceRefresh = false) {
+  const now = Date.now();
+  if (!forceRefresh && _candidateCache && (now - _candidateCacheAt) < CANDIDATE_TTL_MS) {
+    return _candidateCache;
+  }
+  _candidateCache = discoverCandidateTools();
+  _candidateCacheAt = now;
+  return _candidateCache;
+}
+
+async function discoverVerifiedTools(candidateTools) {
   const results = await Promise.allSettled(
-    candidates.map(async (name) => {
+    [...candidateTools.entries()].map(async ([name, meta]) => {
       const exists = await probeToolExists(name);
-      return { name, exists };
+      return { name, meta, exists };
     }),
   );
-  return results
-    .filter((r) => r.status === "fulfilled" && r.value.exists)
-    .map((r) => r.value.name);
+  /** @type {Map<string, { skill?: string, description?: string }>} */
+  const verified = new Map();
+  for (const r of results) {
+    if (r.status === "fulfilled" && r.value.exists) {
+      verified.set(r.value.name, r.value.meta);
+    }
+  }
+  return verified;
+}
+
+// ── Formatting helpers ──────────────────────────────────────────────────────
+
+/**
+ * Extract a short description from SKILL.md frontmatter.
+ * Parses YAML frontmatter between --- delimiters.
+ */
+function extractSkillDescription(skillContent) {
+  const fmMatch = skillContent.match(/^---\n([\s\S]*?)\n---/);
+  if (!fmMatch) return "";
+  const descMatch = fmMatch[1].match(/description:\s*\|?\s*\n?\s*(.+)/);
+  return descMatch ? descMatch[1].trim() : "";
+}
+
+/**
+ * Strip YAML frontmatter from SKILL.md content for clean output.
+ */
+function stripFrontmatter(content) {
+  return content.replace(/^---\n[\s\S]*?\n---\n*/, "").trim();
+}
+
+/**
+ * Extract a capability brief from SKILL.md for use in server instructions.
+ * Pulls: token extraction rules, actions with exact keys, URL patterns,
+ * parameter format hints, and dependency notes.
+ */
+function extractSkillBrief(skillContent) {
+  const body = stripFrontmatter(skillContent);
+  const hints = [];
+
+  const tokenSection = body.match(/## Token Extraction\n+([\s\S]*?)(?=\n## |\n$)/);
+  if (tokenSection) {
+    const rule = tokenSection[1].trim().split("\n")[0];
+    if (rule) hints.push(`Token: ${rule}`);
+  }
+
+  const sections = body.split(/\n(?=## [^#])/);
+  const actionsSection = sections.find((s) => s.startsWith("## Actions"));
+  if (actionsSection) {
+    const actionBlocks = [...actionsSection.matchAll(/^### ([^\n]+)\n[\s\S]*?```json\n\{[^}]*"action"\s*:\s*"(\w+)"[^}]*\}/gm)];
+    if (actionBlocks.length) {
+      hints.push(`Actions: ${actionBlocks.map(([, label, key]) => `${label.replace(/\s*\(.*\)$/, "").trim()}(\`${key}\`)`).join(", ")}`);
+    } else {
+      const actions = [...actionsSection.matchAll(/^### (.+)/gm)].map((m) => m[1].replace(/\s*\(.*\)$/, "").trim());
+      if (actions.length) hints.push(`Actions: ${actions.join(", ")}`);
+    }
+  }
+
+  const urlPatterns = [...body.matchAll(/\w+\.(?:cn|com)\/(\w+)\/\w+/g)].map((m) => m[1]);
+  const uniquePatterns = [...new Set(urlPatterns)];
+  if (uniquePatterns.length) {
+    const host = body.match(/(\w+\.(?:cn|com))\//)?.[1] || "";
+    hints.push(`URL patterns: ${uniquePatterns.map((p) => `${host}/${p}/...`).join(", ")}`);
+  }
+
+  if (actionsSection) {
+    const firstExample = actionsSection.match(/```json\n(\{[\s\S]*?\})\n```/);
+    if (firstExample) {
+      hints.push(`Params: pass \`action\` and remaining fields as \`args_json\` JSON string. Example: ${firstExample[1].replace(/\s+/g, " ")}`);
+    }
+  }
+
+  const depMatch = body.match(/\*\*(?:Dependency|Note):\*\*\s*(.+)/);
+  if (depMatch) hints.push(`Note: ${depMatch[1].trim()}`);
+
+  return hints.join(". ");
 }
 
 // ── Build MCP server ────────────────────────────────────────────────────────
 
 const VERSION = readPackageVersion();
-const server = new McpServer({ name: "openclaw-gateway", version: VERSION });
+
+// Build server instructions dynamically from discovered tools and skills
+function buildServerInstructions() {
+  const candidateTools = getCachedCandidateTools();
+  if (candidateTools.size === 0) {
+    return "OpenClaw Gateway MCP server. Call openclaw_discover to see available tools.";
+  }
+
+  const toolLines = [];
+  for (const [name, meta] of candidateTools) {
+    const hasSkill = !!meta.skill;
+    const desc = hasSkill ? extractSkillDescription(meta.skill) : (meta.description || "");
+    const brief = hasSkill ? extractSkillBrief(meta.skill) : "";
+    const line = [`  - ${name}:`, desc, brief].filter(Boolean).join(" ");
+    toolLines.push(line);
+  }
+
+  return [
+    "OpenClaw Gateway — tool server for external service integrations.",
+    "",
+    "CAPABILITIES:",
+    ...toolLines,
+    "",
+    "USAGE:",
+    "  1. When a user mentions URLs or services matching the capabilities above, use the corresponding tool.",
+    "  2. Use the token extraction rules and action keys above to call tools directly for common read/write operations.",
+    "  3. Call openclaw_skill(tool_name) for advanced operations, complex parameters, or when unsure about usage.",
+    "  4. Call openclaw_discover for a refreshed list of all available tools.",
+  ].join("\n");
+}
+
+const serverInstructions = buildServerInstructions();
+const server = new McpServer(
+  { name: "openclaw-gateway", version: VERSION },
+  { instructions: serverInstructions },
+);
 
 const registeredNames = new Set();
 
 log("info", `Starting openclaw-gateway MCP server v${VERSION}`);
 log("info", `Gateway: ${GATEWAY_URL}`);
 
-let startupTools = [];
-let toolMeta = {};
+/** @type {Map<string, { skill?: string, description?: string }>} */
+let verifiedTools = new Map();
+let gatewayMeta = {};
 
 try {
-  const [tools, meta] = await Promise.all([
-    discoverVerifiedTools(),
+  const candidateTools = getCachedCandidateTools();
+  const [verified, meta] = await Promise.all([
+    discoverVerifiedTools(candidateTools),
     fetchToolDescriptions(),
   ]);
-  startupTools = tools;
-  toolMeta = meta;
-  log("info", `Discovered ${startupTools.length} tools: ${startupTools.join(", ") || "(none)"}`);
+  verifiedTools = verified;
+  gatewayMeta = meta;
+  log("info", `Discovered ${verifiedTools.size} tools: ${[...verifiedTools.keys()].join(", ") || "(none)"}`);
 } catch (err) {
   log("error", `Tool discovery failed: ${err.message}`);
 }
 
-for (const name of startupTools) {
-  const meta = toolMeta[name];
-  const description = meta?.description || `OpenClaw plugin tool: ${name}. Call openclaw_discover for details.`;
+// Lazy-loaded skill content cache (reads from disk, independent of gateway)
+/** @type {Map<string, string> | null} */
+let _skillsCache = null;
+function getSkillsByTool() {
+  if (_skillsCache) return _skillsCache;
+  _skillsCache = new Map();
+  const candidateTools = getCachedCandidateTools();
+  for (const [name, meta] of candidateTools) {
+    if (meta.skill) _skillsCache.set(name, meta.skill);
+  }
+  return _skillsCache;
+}
+
+for (const [name, localMeta] of verifiedTools) {
+  const gwMeta = gatewayMeta[name];
+  const skillContent = localMeta.skill || getSkillsByTool().get(name);
+  const hasSkill = !!skillContent;
+  const baseDesc = hasSkill
+    ? extractSkillDescription(skillContent)
+    : localMeta.description || gwMeta?.description || "";
+  const skillHint = hasSkill ? ` Call openclaw_skill for advanced usage beyond common read/write.` : "";
+  const description = (baseDesc || `OpenClaw tool: ${name}.`) + skillHint;
 
   server.tool(
     name,
@@ -273,33 +530,144 @@ server.tool(
 
 server.tool(
   "openclaw_discover",
-  "Discover all available OpenClaw Gateway tools with live availability check.",
+  "List all available OpenClaw Gateway tools with short descriptions. Use openclaw_skill to get full documentation for a specific tool.",
   {},
   async () => {
-    const candidates = discoverCandidateToolNames();
+    const candidateTools = getCachedCandidateTools(true);
     const results = await Promise.allSettled(
-      candidates.map(async (n) => ({ name: n, ok: await probeToolExists(n) })),
+      [...candidateTools.entries()].map(async ([name, meta]) => ({
+        name,
+        meta,
+        ok: await probeToolExists(name),
+      })),
     );
 
     const available = [];
     const unavailable = [];
     for (const r of results) {
       if (r.status === "fulfilled") {
-        (r.value.ok ? available : unavailable).push(r.value.name);
+        (r.value.ok ? available : unavailable).push(r.value);
       }
     }
 
-    const lines = [
-      `Available tools (${available.length}):`,
-      ...available.map((n) => `  - ${n}${registeredNames.has(n) ? " (direct)" : ""}`),
-    ];
-    if (unavailable.length)
-      lines.push(`\nUnavailable: ${unavailable.join(", ")}`);
+    const lines = [`Available tools (${available.length}):\n`];
+    for (const { name, meta } of available) {
+      const direct = registeredNames.has(name) ? " (direct)" : "";
+      const hasSkill = !!meta.skill;
+      const desc = hasSkill ? extractSkillDescription(meta.skill) : (meta.description || "");
+      const badge = hasSkill ? " [has skill]" : "";
+      lines.push(`- ${name}${direct}${badge}${desc ? ` — ${desc}` : ""}`);
+    }
+
+    if (unavailable.length) {
+      lines.push(`\nUnavailable: ${unavailable.map((u) => u.name).join(", ")}`);
+    }
+
+    const newTools = available.filter(({ name }) => !registeredNames.has(name));
+    if (newTools.length > 0) {
+      lines.push(
+        `\nNew tools available via openclaw_invoke: ${newTools.map((t) => t.name).join(", ")}`,
+        `(These tools were installed after MCP server started. ` +
+          `Use openclaw_invoke to call them, or restart Cursor to register them as direct tools.)`,
+      );
+    }
+
     lines.push(
       `\nDirect MCP tools: ${[...registeredNames].join(", ") || "none"}`,
-      `Tip: (direct) tools can be called by name; others work via openclaw_invoke.`,
+      `\nUsage:`,
+      `  - Use openclaw_skill with tool name to get full documentation (actions, parameters, examples).`,
+      `  - (direct) tools can be called by name; others work via openclaw_invoke.`,
+      `  - Pass action and other parameters in args_json as a JSON string.`,
     );
     return { content: [{ type: "text", text: lines.join("\n") }] };
+  },
+);
+
+/**
+ * Find tools referenced in skill content that are known to exist.
+ * Returns list of { name, hasSkill, description } for referenced tools.
+ */
+function findReferencedTools(skillContent, excludeTools, allSkills, candidateTools) {
+  const pattern = /\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b/g;
+  const mentioned = new Set();
+  for (const m of skillContent.matchAll(pattern)) {
+    const name = m[1];
+    if (!excludeTools.has(name) && (allSkills.has(name) || candidateTools.has(name))) {
+      mentioned.add(name);
+    }
+  }
+  const refs = [];
+  for (const name of mentioned) {
+    const hasSkill = allSkills.has(name);
+    const desc = hasSkill
+      ? extractSkillDescription(allSkills.get(name))
+      : candidateTools.get(name)?.description || "";
+    refs.push({ name, hasSkill, description: desc });
+  }
+  return refs;
+}
+
+server.tool(
+  "openclaw_skill",
+  "Get full usage documentation (actions, parameters, JSON examples) for OpenClaw tools. Accepts one or more tool names (comma-separated). Call this before using a tool you haven't used before.",
+  {
+    tool: z.string().describe("Tool name(s), comma-separated (e.g. 'feishu_doc' or 'feishu_wiki,feishu_doc')"),
+  },
+  async (params) => {
+    const skills = getSkillsByTool();
+    const candidates = getCachedCandidateTools();
+    const requestedNames = params.tool.split(",").map((s) => s.trim()).filter(Boolean);
+    const requestedSet = new Set(requestedNames);
+
+    const sections = [];
+    const notFound = [];
+    const allRefs = [];
+
+    for (const name of requestedNames) {
+      const skill = skills.get(name);
+      if (skill) {
+        sections.push(`# ${name}\n\n${stripFrontmatter(skill)}`);
+        const refs = findReferencedTools(skill, requestedSet, skills, candidates);
+        allRefs.push(...refs);
+        continue;
+      }
+
+      const gwMeta = gatewayMeta[name];
+      const candidateMeta = candidates.get(name);
+      const desc = gwMeta?.description || candidateMeta?.description || "";
+      if (desc) {
+        sections.push(`# ${name}\n\nNo detailed skill documentation available.\n\nDescription: ${desc}`);
+      } else {
+        notFound.push(name);
+      }
+    }
+
+    if (notFound.length) {
+      const allTools = [...skills.keys(), ...[...candidates.keys()].filter((n) => !skills.has(n))];
+      sections.push(`Not found: ${notFound.join(", ")}.\nAvailable tools: ${allTools.join(", ")}`);
+    }
+
+    // Deduplicate refs and exclude already-loaded tools
+    const seenRefs = new Set(requestedNames);
+    const uniqueRefs = allRefs.filter((r) => {
+      if (seenRefs.has(r.name)) return false;
+      seenRefs.add(r.name);
+      return true;
+    });
+
+    if (uniqueRefs.length > 0) {
+      const refLines = uniqueRefs.map((r) => {
+        const badge = r.hasSkill ? " [has skill]" : "";
+        return `  - ${r.name}${badge}${r.description ? ` — ${r.description}` : ""}`;
+      });
+      sections.push(`\n---\nReferenced tools (use openclaw_skill to load):\n${refLines.join("\n")}`);
+    }
+
+    const text = sections.join("\n\n");
+    return {
+      content: [{ type: "text", text }],
+      ...(notFound.length === requestedNames.length ? { isError: true } : {}),
+    };
   },
 );
 

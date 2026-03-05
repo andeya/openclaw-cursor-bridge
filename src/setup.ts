@@ -65,32 +65,47 @@ function cursorSupportsStreamJson(cursorPath: string): boolean {
   }
 }
 
-export function discoverCursorModels(cursorPath: string, logger?: PluginLogger): CursorModel[] {
-  try {
-    const output = execSync(`"${cursorPath}" --list-models`, {
-      encoding: "utf-8",
-      timeout: 15000,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    const models: CursorModel[] = [];
-    for (const line of output.split("\n")) {
-      const match = line.match(/^(\S+)\s+-\s+(.+?)(?:\s+\((current|default)\))?$/);
-      if (!match) continue;
-      const [, id, rawName, annotation] = match;
-      const name = rawName.trim();
-      models.push({
-        id,
-        name,
-        reasoning: id.includes("thinking"),
-        isDefault: annotation === "default",
+export function discoverCursorModels(
+  cursorPath: string,
+  logger?: PluginLogger,
+  { retries = 2, timeoutMs = 30000 }: { retries?: number; timeoutMs?: number } = {},
+): CursorModel[] {
+  let lastError: Error | undefined;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const output = execSync(`"${cursorPath}" --list-models`, {
+        encoding: "utf-8",
+        timeout: timeoutMs,
+        stdio: ["pipe", "pipe", "pipe"],
       });
+      const models: CursorModel[] = [];
+      for (const line of output.split("\n")) {
+        const match = line.match(/^(\S+)\s+-\s+(.+?)(?:\s+\((current|default)\))?$/);
+        if (!match) continue;
+        const [, id, rawName, annotation] = match;
+        const name = rawName.trim();
+        models.push({
+          id,
+          name,
+          reasoning: id.includes("thinking"),
+          isDefault: annotation === "default",
+        });
+      }
+      if (models.length > 0) {
+        logger?.info(`Discovered ${models.length} cursor-agent models`);
+        return models;
+      }
+      lastError = new Error("command succeeded but parsed 0 models from output");
+    } catch (e: any) {
+      lastError = e;
     }
-    logger?.info(`Discovered ${models.length} cursor-agent models`);
-    return models;
-  } catch (e: any) {
-    logger?.warn(`Could not list cursor-agent models: ${e.message}`);
-    return [];
+    if (attempt < retries) {
+      logger?.warn(`Model discovery attempt ${attempt + 1} failed (${lastError?.message}), retrying...`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
+    }
   }
+  logger?.warn(`Could not list cursor-agent models after ${retries + 1} attempts: ${lastError?.message}`);
+  return [];
 }
 
 export function detectOutputFormat(

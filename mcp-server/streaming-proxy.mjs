@@ -18,7 +18,7 @@
 import http from "node:http";
 import { spawn, execSync } from "node:child_process";
 import { createInterface } from "node:readline";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -31,9 +31,22 @@ const API_KEY = process.env.CURSOR_PROXY_API_KEY || "";
 const OUTPUT_FORMAT = process.env.CURSOR_OUTPUT_FORMAT || "stream-json";
 const CURSOR_MODEL = process.env.CURSOR_MODEL || "";
 
+const FORWARD_THINKING = process.env.CURSOR_PROXY_FORWARD_THINKING === "true";
+const INSTANT_RESULT = process.env.CURSOR_PROXY_INSTANT_RESULT !== "false";
 const TARGET_CHARS_PER_SEC = parseInt(process.env.CURSOR_PROXY_STREAM_SPEED || "200", 10);
 const SHORT_TEXT_THRESHOLD = 100;
 const REQUEST_TIMEOUT_MS = parseInt(process.env.CURSOR_PROXY_REQUEST_TIMEOUT || "300000", 10); // 5 min default
+
+// ── Script identity ─────────────────────────────────────────────────────────
+
+function computeScriptHash() {
+  try {
+    const scriptPath = new URL(import.meta.url).pathname;
+    const content = readFileSync(scriptPath, "utf-8");
+    return createHash("sha256").update(content).digest("hex").slice(0, 12);
+  } catch { return "unknown"; }
+}
+const SCRIPT_HASH = computeScriptHash();
 
 // ── Cursor path auto-detection ──────────────────────────────────────────────
 
@@ -209,20 +222,61 @@ function spawnCursorAgent(userMsg, sessionKey, requestModel) {
   });
   child.stdin.write(userMsg);
   child.stdin.end();
-  child.stderr.on("data", () => {});
+  let stderrBuf = "";
+  child.stderr.on("data", (d) => { stderrBuf += d; });
+  child.stderr.on("close", () => {
+    if (stderrBuf.trim()) log("debug", `cursor-agent stderr: ${stderrBuf.trim().slice(0, 500)}`);
+  });
   return child;
+}
+
+// ── Session auto-derive from message metadata ──────────────────────────────
+
+const CONV_INFO_RE = /Conversation info \(untrusted metadata\):\s*```json\s*(\{[\s\S]*?\})\s*```/;
+
+function extractSessionFromMeta(messages) {
+  if (!Array.isArray(messages)) return null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role !== "user") continue;
+    const text = typeof m.content === "string" ? m.content
+      : Array.isArray(m.content) ? m.content.filter((c) => c.type === "text").map((c) => c.text).join("\n")
+      : "";
+    const match = text.match(CONV_INFO_RE);
+    if (!match) continue;
+    try {
+      const info = JSON.parse(match[1]);
+      if (info.is_group_chat && info.group_channel) {
+        return `auto:grp:${info.group_channel}:${info.topic_id || "main"}`;
+      }
+      if (info.sender_id) {
+        return `auto:dm:${info.sender_id}`;
+      }
+    } catch {}
+  }
+  return null;
 }
 
 // ── Streaming handler (real-time thinking + smart chunked result) ────────────
 
+function resolveSessionKey(body, req) {
+  if (body._openclaw_session_id) return { key: body._openclaw_session_id, src: "body._openclaw" };
+  if (body.session_id) return { key: body.session_id, src: "body.session_id" };
+  if (req.headers["x-openclaw-session-id"]) return { key: req.headers["x-openclaw-session-id"], src: "header.x-openclaw" };
+  if (req.headers["x-session-id"]) return { key: req.headers["x-session-id"], src: "header.x-session" };
+  const metaKey = extractSessionFromMeta(body.messages);
+  if (metaKey) return { key: metaKey, src: "meta.auto" };
+  return { key: null, src: "none" };
+}
+
 async function handleStream(req, res, body) {
   const userMsg = extractUserMessage(body.messages);
   const model = body.model || "auto";
-  const sessionKey = body._openclaw_session_id || body.session_id || null;
+  const { key: sessionKey, src: sessionSrc } = resolveSessionKey(body, req);
   const requestId = `chatcmpl-${randomUUID().slice(0, 8)}`;
   const msgPreview = userMsg.slice(0, 80).replace(/\n/g, " ");
 
-  log("info", `[${requestId}] stream request: model=${model}, session=${sessionKey || "none"}, msg="${msgPreview}${userMsg.length > 80 ? "…" : ""}"`);
+  log("info", `[${requestId}] stream request: model=${model}, session=${sessionKey || "none"}(${sessionSrc}), msg="${msgPreview}${userMsg.length > 80 ? "…" : ""}"`);
 
   const child = spawnCursorAgent(userMsg, sessionKey, model);
   const startTime = Date.now();
@@ -241,6 +295,8 @@ async function handleStream(req, res, body) {
 
   let resultText = "";
   let hasStreamedContent = false;
+  let clientGone = false;
+  const toolCalls = new Map();
 
   const rl = createInterface({ input: child.stdout, terminal: false });
 
@@ -262,7 +318,41 @@ async function handleStream(req, res, body) {
 
     const type = parsed.type;
 
-    if (type === "thinking") return;
+    if (type === "tool_call") {
+      const callId = parsed.call_id || "unknown";
+      const tc = parsed.tool_call || {};
+      const toolKey = Object.keys(tc)[0] || "unknown";
+      if (parsed.subtype === "started") {
+        toolCalls.set(callId, { tool: toolKey, startTime: Date.now() });
+        const args = tc[toolKey]?.args;
+        const argsSummary = args ? JSON.stringify(args).slice(0, 120) : "";
+        log("info", `[${requestId}] tool:start ${toolKey}${argsSummary ? ` args=${argsSummary}` : ""} (call_id=${callId})`);
+      } else if (parsed.subtype === "completed") {
+        const tracked = toolCalls.get(callId);
+        const elapsed = tracked ? `${Date.now() - tracked.startTime}ms` : "?ms";
+        const result = tc[toolKey]?.result;
+        const ok = result ? !!result.success : null;
+        log("info", `[${requestId}] tool:done  ${tracked?.tool || toolKey} ${elapsed}${ok !== null ? ` ok=${ok}` : ""} (call_id=${callId})`);
+        toolCalls.delete(callId);
+      }
+      return;
+    }
+
+    if (type === "thinking") {
+      if (FORWARD_THINKING && parsed.text) {
+        hasStreamedContent = true;
+        const delta = { reasoning_content: parsed.text };
+        const chunk = {
+          id: requestId,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          model,
+          choices: [{ index: 0, delta, finish_reason: null }],
+        };
+        res.write("data: " + JSON.stringify(chunk) + "\n\n");
+      }
+      return;
+    }
 
     if (type === "text" && parsed.text) {
       hasStreamedContent = true;
@@ -290,10 +380,19 @@ async function handleStream(req, res, body) {
     clearTimeout(timeout);
     const elapsed = Date.now() - startTime;
 
+    if (clientGone) {
+      log("info", `[${requestId}] agent finished after client disconnect, ${(elapsed / 1000).toFixed(1)}s, resultLen=${resultText.length}`);
+      return;
+    }
+
     if (!hasStreamedContent && !resultText) {
       res.write(sseEvent(requestId, model, { content: "(no response from cursor-agent)" }));
     } else if (resultText && !hasStreamedContent) {
-      await streamChunked(res, requestId, model, resultText);
+      if (INSTANT_RESULT) {
+        res.write(sseEvent(requestId, model, { content: resultText }));
+      } else {
+        await streamChunked(res, requestId, model, resultText);
+      }
     } else if (resultText && hasStreamedContent) {
       log("debug", `[${requestId}] result received after text deltas, skipping duplicate`);
     }
@@ -305,6 +404,7 @@ async function handleStream(req, res, body) {
   });
 
   req.on("close", () => {
+    clientGone = true;
     clearTimeout(timeout);
     child.kill();
     log("info", `[${requestId}] client disconnected after ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
@@ -316,12 +416,12 @@ async function handleStream(req, res, body) {
 function handleNonStream(req, res, body) {
   const userMsg = extractUserMessage(body.messages);
   const model = body.model || "auto";
-  const sessionKey = body._openclaw_session_id || body.session_id || null;
+  const { key: sessionKey, src: sessionSrc } = resolveSessionKey(body, req);
   const requestId = `chatcmpl-${randomUUID().slice(0, 8)}`;
   const msgPreview = userMsg.slice(0, 80).replace(/\n/g, " ");
   const startTime = Date.now();
 
-  log("info", `[${requestId}] non-stream request: model=${model}, session=${sessionKey || "none"}, msg="${msgPreview}${userMsg.length > 80 ? "…" : ""}"`);
+  log("info", `[${requestId}] non-stream request: model=${model}, session=${sessionKey || "none"}(${sessionSrc}), msg="${msgPreview}${userMsg.length > 80 ? "…" : ""}"`);
 
   const child = spawnCursorAgent(userMsg, sessionKey, model);
   let stdout = "";
@@ -342,10 +442,25 @@ function handleNonStream(req, res, body) {
   child.on("close", () => {
     clearTimeout(timeout);
     let resultText = "";
+    let thinkingText = "";
     for (const line of stdout.split("\n")) {
       try {
         const p = JSON.parse(line.trim());
+        if (p.type === "tool_call") {
+          const callId = p.call_id || "unknown";
+          const tc = p.tool_call || {};
+          const toolKey = Object.keys(tc)[0] || "unknown";
+          if (p.subtype === "started") {
+            const args = tc[toolKey]?.args;
+            const argsSummary = args ? JSON.stringify(args).slice(0, 120) : "";
+            log("info", `[${requestId}] tool:start ${toolKey}${argsSummary ? ` args=${argsSummary}` : ""} (call_id=${callId})`);
+          } else if (p.subtype === "completed") {
+            const ok = tc[toolKey]?.result ? !!tc[toolKey].result.success : null;
+            log("info", `[${requestId}] tool:done  ${toolKey}${ok !== null ? ` ok=${ok}` : ""} (call_id=${callId})`);
+          }
+        }
         if (p.type === "result" && typeof p.result === "string") resultText = p.result;
+        if (p.type === "thinking" && FORWARD_THINKING && p.text) thinkingText += p.text;
         if (p.session_id && sessionKey) {
           setSession(sessionKey, p.session_id);
         }
@@ -363,7 +478,11 @@ function handleNonStream(req, res, body) {
         model,
         choices: [{
           index: 0,
-          message: { role: "assistant", content },
+          message: {
+            role: "assistant",
+            content,
+            ...(thinkingText ? { reasoning_content: thinkingText } : {}),
+          },
           finish_reason: "stop",
         }],
         usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
@@ -387,15 +506,26 @@ function checkAuth(req, res) {
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-OpenClaw-Session-Id, X-Session-Id");
 }
 
 // ── HTTP server ─────────────────────────────────────────────────────────────
 
+const MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MB
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = "";
-    req.on("data", (c) => (data += c));
+    let bytes = 0;
+    req.on("data", (c) => {
+      bytes += c.length;
+      if (bytes > MAX_BODY_BYTES) {
+        req.destroy();
+        reject(new Error(`Request body exceeds ${MAX_BODY_BYTES} bytes`));
+        return;
+      }
+      data += c;
+    });
     req.on("end", () => {
       try {
         resolve(JSON.parse(data));
@@ -418,7 +548,7 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "GET" && req.url === "/v1/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    return res.end(JSON.stringify({ status: "ok", cursor: !!CURSOR_PATH, port: PORT, sessions: sessions.size }));
+    return res.end(JSON.stringify({ status: "ok", cursor: !!CURSOR_PATH, port: PORT, sessions: sessions.size, scriptHash: SCRIPT_HASH }));
   }
 
   if (req.method === "GET" && req.url === "/v1/models") {
@@ -454,8 +584,12 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, "127.0.0.1", () => {
   log("info", `Cursor streaming proxy on http://127.0.0.1:${PORT}`);
-  log("info", `Cursor agent: ${CURSOR_PATH || "(not found)"}`);
-  log("info", `Model: ${CURSOR_MODEL || "auto"}, Format: ${OUTPUT_FORMAT}, Partial: on`);
+  if (CURSOR_PATH) {
+    log("info", `Cursor agent: ${CURSOR_PATH}`);
+  } else {
+    log("warn", "cursor-agent not found — all /v1/chat/completions requests will fail. Set CURSOR_PATH or install Cursor.");
+  }
+  log("info", `Model: ${CURSOR_MODEL || "auto"}, Format: ${OUTPUT_FORMAT}, Partial: on, Thinking: ${FORWARD_THINKING ? "forward" : "drop"}, InstantResult: ${INSTANT_RESULT}, SessionAuto: true`);
   log("info", `Sessions loaded: ${sessions.size} (max ${MAX_SESSIONS})`);
   if (API_KEY) log("info", "API key authentication enabled");
   if (WORKSPACE_DIR) log("info", `Workspace: ${WORKSPACE_DIR}`);

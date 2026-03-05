@@ -11,7 +11,7 @@
     <a href="https://nodejs.org"><img src="https://img.shields.io/badge/Node.js-%3E%3D18-green.svg" alt="Node.js >= 18"></a>
     <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
     <br/>
-    <a href="./README_ZH.md">中文文档</a>
+    <a href="./README_ZH.md">中文文档</a> · <a href="./doc/technical-guide-en.md">Technical Guide</a> · <a href="./doc/technical-guide-zh.md">技术设计文档</a>
   </p>
 </p>
 
@@ -73,10 +73,10 @@ flowchart TB
 
 Two auto-configured paths:
 
-1. **Streaming Proxy** — local OpenAI-compatible server (`/v1/chat/completions`) spawns `cursor-agent` with `--stream-partial-output`, streams text deltas as SSE in real-time
-2. **MCP Server** — Cursor IDE calls OpenClaw tools via stdio, proxied to Gateway REST API with timeout/retry
+1. **Streaming Proxy** — local OpenAI-compatible server (`/v1/chat/completions`) spawns `cursor-agent` with `--stream-partial-output`, streams text deltas as SSE in real-time. Includes tool call logging, instant result delivery, optional thinking forwarding, and script hash-based auto-restart on upgrade.
+2. **MCP Server** — Cursor IDE calls OpenClaw tools via stdio, proxied to Gateway REST API with timeout/retry. Server instructions include rich tool descriptions (token extraction rules, action keys, parameter examples) to minimize unnecessary `openclaw_skill` calls.
 
-Sessions are persisted to disk and reused via `--resume` for faster subsequent responses (context survives restarts). New plugins are auto-discovered on gateway restart.
+Sessions are persisted to disk and reused via `--resume` for faster subsequent responses (context survives restarts). Session IDs are automatically derived from conversation metadata embedded in user messages (e.g., `sender_id` for DM, `group_channel` + `topic_id` for group chats), or can be passed explicitly via body fields (`_openclaw_session_id`, `session_id`) or HTTP headers (`X-OpenClaw-Session-Id`, `X-Session-Id`). New plugins are auto-discovered on gateway restart.
 
 ## Bidirectional Enhancement
 
@@ -89,14 +89,20 @@ Sessions are persisted to disk and reused via `--resume` for faster subsequent r
 - **Zero config** — install and restart; everything auto-configures
 - **Interactive model selection** — `setup`/`upgrade` present all discovered models via `@clack/prompts` (single-select primary, multi-select ordered fallbacks)
 - **Dynamic model discovery** — models auto-detected from `cursor-agent --list-models`, synced to OpenClaw on every gateway start
-- **Real-time streaming** — `--stream-partial-output` for character-level text deltas; smart-chunked fallback for batch results (~200 chars/s, configurable)
-- **Tool auto-discovery** — source scanning + REST API parallel verification
-- **Session persistence** — cursor-agent sessions persisted to disk (`~/.openclaw/cursor-sessions.json`), surviving proxy and gateway restarts; `--resume` reuses sessions automatically
+- **Real-time streaming** — `--stream-partial-output` for character-level text deltas; instant result delivery by default (`CURSOR_PROXY_INSTANT_RESULT=true`), with optional smart-chunked fallback
+- **Thinking forwarding** — optionally stream LLM reasoning via `reasoning_content` (OpenAI-compatible `CURSOR_PROXY_FORWARD_THINKING=true`)
+- **Rich tool descriptions** — MCP server instructions include token extraction rules, exact action keys, and parameter examples from SKILL.md — reducing unnecessary `openclaw_skill` calls
+- **Tool call logging** — proxy logs every tool invocation with name, arguments summary, duration, and call ID for diagnostics
+- **Tool auto-discovery** — source scanning + REST API parallel verification; cached with 60s TTL
+- **Session auto-derive** — session keys automatically derived from conversation metadata (sender/group/topic) in user messages; no explicit session ID required from Gateway
+- **Session persistence** — cursor-agent sessions persisted to disk (`~/.openclaw/cursor-sessions.json`); explicit session IDs also accepted via body fields or HTTP headers (`X-OpenClaw-Session-Id`, `X-Session-Id`)
+- **Auto-restart on upgrade** — proxy exposes a `scriptHash` in `/v1/health`; gateway compares it against the installed script hash and auto-restarts when code changes
 - **Standalone proxy** — `streaming-proxy.mjs` runs independently as OpenAI-compatible API (auto-detection, API key auth, CORS)
 - **Reliability** — tool call timeout (60s), retry (2x), structured MCP errors (`isError: true`)
 - **Proxy management** — `proxy status/stop/restart/log` commands for lifecycle control without restarting gateway
 - **Diagnostics** — `doctor` (10+ checks), `status`, and `proxy log` commands
-- **Cross-platform** — macOS, Linux, Windows
+- **Request safety** — request body size limit (10 MB), per-request timeout, graceful client disconnect handling
+- **Cross-platform** — macOS, Linux, Windows (port management, health checks)
 
 ## Configuration
 
@@ -118,7 +124,9 @@ In `openclaw.json` under `plugins.entries.openclaw-cursor-brain.config`:
 |---|---|---|
 | `OPENCLAW_TOOL_TIMEOUT_MS` | `60000` | Tool call timeout (ms) |
 | `OPENCLAW_TOOL_RETRY_COUNT` | `2` | Max retries on transient errors |
-| `CURSOR_PROXY_STREAM_SPEED` | `200` | Chunked streaming speed (chars/sec) |
+| `CURSOR_PROXY_INSTANT_RESULT` | `true` | Send batch results instantly instead of simulated streaming |
+| `CURSOR_PROXY_FORWARD_THINKING` | `false` | Forward LLM reasoning as `reasoning_content` in SSE chunks |
+| `CURSOR_PROXY_STREAM_SPEED` | `200` | Chunked streaming speed (chars/sec, only when `INSTANT_RESULT=false`) |
 | `CURSOR_PROXY_REQUEST_TIMEOUT` | `300000` | Per-request timeout in ms (default 5 min) |
 | `CURSOR_PROXY_API_KEY` | *(none)* | API key for standalone proxy auth |
 
@@ -154,7 +162,7 @@ curl http://127.0.0.1:18790/v1/chat/completions \
   -d '{"model":"auto","stream":true,"messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
-Endpoints: `POST /v1/chat/completions`, `GET /v1/models`, `GET /v1/health`. Supports API key auth, CORS, and session reuse.
+Endpoints: `POST /v1/chat/completions`, `GET /v1/models`, `GET /v1/health` (returns `scriptHash` for version detection). Supports API key auth, CORS, session reuse via body or headers.
 
 <details>
 <summary><strong>Auto-configured files</strong></summary>
@@ -217,8 +225,12 @@ Endpoints: `POST /v1/chat/completions`, `GET /v1/models`, `GET /v1/health`. Supp
 | Tools not appearing | Restart gateway, call `openclaw_discover` in Cursor |
 | Tool timeout | Set `OPENCLAW_TOOL_TIMEOUT_MS=120000` |
 | Proxy not starting | `openclaw cursor-brain proxy log` to check; `proxy restart` to force start |
+| Proxy not updating after upgrade | Gateway auto-restarts proxy when `scriptHash` differs; verify with `curl http://127.0.0.1:18790/v1/health` |
+| Slow batch responses | `CURSOR_PROXY_INSTANT_RESULT` defaults to `true`; if set to `false`, batch results are chunked at ~200 chars/s |
+| Context lost between messages | Check `cursor-proxy.log` for `session=auto:dm:…(meta.auto)` — if showing `session=none(none)`, ensure Gateway embeds "Conversation info" metadata in user messages |
 | Context lost after restart | Sessions auto-persist to disk; use `proxy restart` (not `gateway restart`) to keep sessions |
 | Debug MCP server | `OPENCLAW_GATEWAY_URL=... node mcp-server/server.mjs` |
+| Debug tool calls | Check `~/.openclaw/cursor-proxy.log` for `tool:start` / `tool:done` entries |
 
 </details>
 
