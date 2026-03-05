@@ -83,14 +83,14 @@ flowchart LR
 
     subgraph pathA ["路径 A: OpenClaw → Cursor（AI 后端）"]
         direction LR
-        GW_A["OpenClaw\nGateway"]
+        GW_A["OpenClaw<br/>Gateway"]
         subgraph ProxyDetail ["⚡ Streaming Proxy :18790"]
             direction TB
             API["OpenAI 兼容 API"]
-            SessionMgr["Session 自动推导\n(meta → key → --resume)"]
+            SessionMgr["Session 自动推导<br/>(meta → key → --resume)"]
             API --- SessionMgr
         end
-        Agent["🧠 cursor-agent\n-p --stream-partial-output\n--trust --approve-mcps"]
+        Agent["🧠 cursor-agent<br/>-p --stream-partial-output<br/>--trust --approve-mcps"]
     end
 
     subgraph pathB ["路径 B: Cursor → OpenClaw（工具调用）"]
@@ -98,28 +98,28 @@ flowchart LR
         subgraph MCPDetail ["🔌 MCP Server (stdio)"]
             direction TB
             MCPCore["工具代理 + 重试"]
-            Skills["Rich Instructions\n(extractSkillBrief)"]
+            Skills["Rich Instructions<br/>(extractSkillBrief)"]
             MCPCore --- Skills
         end
-        GW_B["Gateway\nREST API"]
+        GW_B["Gateway<br/>REST API"]
     end
 
     subgraph Tools ["🛠️ 插件生态"]
         direction TB
-        T1["feishu_doc\nfeishu_wiki"]
-        T2["GitHub\nSlack"]
-        T3["Database\n自定义插件"]
+        T1["feishu_doc<br/>feishu_wiki"]
+        T2["GitHub<br/>Slack"]
+        T3["Database<br/>自定义插件"]
     end
 
     Channels -->|"用户消息"| GW_A
-    GW_A -->|"POST /v1/chat/completions\n(含 Conversation info 元数据)"| API
-    SessionMgr -->|"spawn + stdin\n(--resume sessionId)"| Agent
-    Agent -->|"stdout: JSON lines\n(text/result/tool_call/session_id)"| API
-    API -->|"SSE 实时流\ndata: {choices:[{delta:{content}}]}"| GW_A
+    GW_A -->|"POST /v1/chat/completions<br/>(含 Conversation info 元数据)"| API
+    SessionMgr -->|"spawn + stdin<br/>(--resume sessionId)"| Agent
+    Agent -->|"stdout: JSON lines<br/>(text/result/tool_call/session_id)"| API
+    API -->|"SSE 实时流<br/>data: {choices:[{delta:{content}}]}"| GW_A
     GW_A -->|"回复"| Channels
 
-    Agent <-->|"MCP stdio\n(CallTool)"| MCPCore
-    MCPCore -->|"POST /tools/invoke\n{tool, args}"| GW_B
+    Agent <-->|"MCP stdio<br/>(CallTool)"| MCPCore
+    MCPCore -->|"POST /tools/invoke<br/>{tool, args}"| GW_B
     GW_B --> Tools
 
     style API fill:#2563eb,color:#fff,stroke:#1d4ed8
@@ -140,25 +140,25 @@ flowchart LR
 ```mermaid
 flowchart TB
     subgraph Orchestration ["🎛️ 编排层 (Gateway 启动时运行)"]
-        PluginEntry["<b>index.ts</b>\n插件入口 · register() · CLI"]
-        Setup["<b>setup.ts</b>\nCursor 检测 · 模型发现\nMCP 配置 · 格式探测"]
-        Doctor["<b>doctor.ts</b>\n11 项健康检查"]
-        Cleanup["<b>cleanup.ts</b>\n3 层卸载清理"]
+        PluginEntry["<b>index.ts</b><br/>插件入口 · register() · CLI"]
+        Setup["<b>setup.ts</b><br/>Cursor 检测 · 模型发现<br/>MCP 配置 · 格式探测"]
+        Doctor["<b>doctor.ts</b><br/>11 项健康检查"]
+        Cleanup["<b>cleanup.ts</b><br/>3 层卸载清理"]
     end
 
     subgraph Runtime ["⚙️ 运行时 (常驻进程)"]
-        Proxy["<b>streaming-proxy.mjs</b>\nHTTP :18790 · Session 管理\nSSE 流 · 工具调用日志"]
-        MCPServer["<b>server.mjs</b>\n工具发现 · 富指令\n超时/重试 · 缓存"]
+        Proxy["<b>streaming-proxy.mjs</b><br/>HTTP :18790 · Session 管理<br/>SSE 流 · 工具调用日志"]
+        MCPServer["<b>server.mjs</b><br/>工具发现 · 富指令<br/>超时/重试 · 缓存"]
     end
 
     subgraph External ["🌐 外部依赖"]
-        GW["OpenClaw Gateway\nREST API :18789"]
-        Agent["cursor-agent CLI\n--stream-partial-output"]
-        CursorIDE["Cursor IDE\n(管理 MCP 生命周期)"]
+        GW["OpenClaw Gateway<br/>REST API :18789"]
+        Agent["cursor-agent CLI<br/>--stream-partial-output"]
+        CursorIDE["Cursor IDE<br/>(管理 MCP 生命周期)"]
     end
 
     PluginEntry -->|"runSetup()"| Setup
-    PluginEntry -->|"startProxy()\nscriptHash 检测"| Proxy
+    PluginEntry -->|"startProxy()<br/>scriptHash 检测"| Proxy
     PluginEntry -->|"runDoctorChecks()"| Doctor
     PluginEntry -->|"runCleanup()"| Cleanup
     Proxy -->|"spawn per request"| Agent
@@ -197,23 +197,23 @@ MCP Server 通过 stdio 与 Cursor IDE 通信（由 `~/.cursor/mcp.json` 配置�
 ```mermaid
 flowchart TD
     Start(["🚀 register(api) 被调用"])
-    Start --> IsUninstall{"argv 含\nuninstall / upgrade?"}
+    Start --> IsUninstall{"argv 含<br/>uninstall / upgrade?"}
     IsUninstall -->|"是"| SkipSetup["⏭️ 跳过 setup 和 proxy"]
 
-    IsUninstall -->|"否"| RunSetup["runSetup(ctx)\nCursor 检测 · 模型发现 · MCP 写入"]
-    RunSetup --> SyncProvider{"provider 配置\n是否变化?"}
-    SyncProvider -->|"JSON.stringify\n相同"| LogUnchanged["📋 日志: unchanged\n跳过写入"]
-    SyncProvider -->|"不同"| WriteConfig["💾 writeConfigFile(patch)\n同步 models + agents"]
+    IsUninstall -->|"否"| RunSetup["runSetup(ctx)<br/>Cursor 检测 · 模型发现 · MCP 写入"]
+    RunSetup --> SyncProvider{"provider 配置<br/>是否变化?"}
+    SyncProvider -->|"JSON.stringify<br/>相同"| LogUnchanged["📋 日志: unchanged<br/>跳过写入"]
+    SyncProvider -->|"不同"| WriteConfig["💾 writeConfigFile(patch)<br/>同步 models + agents"]
 
     WriteConfig --> CheckProxy
     LogUnchanged --> CheckProxy
-    CheckProxy{"proxy\n是否运行?"}
-    CheckProxy -->|"未运行"| StartProxy["🔄 startProxy()\nkill → wait → spawn"]
-    CheckProxy -->|"运行中"| HashCheck{"scriptHash\n是否一致?"}
+    CheckProxy{"proxy<br/>是否运行?"}
+    CheckProxy -->|"未运行"| StartProxy["🔄 startProxy()<br/>kill → wait → spawn"]
+    CheckProxy -->|"运行中"| HashCheck{"scriptHash<br/>是否一致?"}
     HashCheck -->|"SHA-256 匹配"| LogUpToDate["✅ 日志: up-to-date"]
-    HashCheck -->|"哈希不同\n代码已更新"| StartProxy
+    HashCheck -->|"哈希不同<br/>代码已更新"| StartProxy
 
-    StartProxy --> RegisterCLI["📝 注册 CLI 命令\nsetup · doctor · status\nupgrade · uninstall · proxy"]
+    StartProxy --> RegisterCLI["📝 注册 CLI 命令<br/>setup · doctor · status<br/>upgrade · uninstall · proxy"]
     LogUpToDate --> RegisterCLI
     SkipSetup --> RegisterCLI
 
@@ -344,25 +344,25 @@ MCP Server 是本项目最复杂的模块，负责将 OpenClaw 的所有插件�
 ```mermaid
 flowchart TD
     subgraph p1 ["📂 阶段 1: 候选工具发现 (磁盘 I/O, 60s 缓存)"]
-        ReadConfig["读取 openclaw.json\n→ 获取插件安装路径"] --> ScanSkills["扫描 SKILL.md\n→ 工具名 + 完整文档"]
-        ReadConfig --> ScanSource["扫描 src/*.ts\n→ name/description 模式匹配"]
+        ReadConfig["读取 openclaw.json<br/>→ 获取插件安装路径"] --> ScanSkills["扫描 SKILL.md<br/>→ 工具名 + 完整文档"]
+        ReadConfig --> ScanSource["扫描 src/*.ts<br/>→ name/description 模式匹配"]
         ScanSkills --> Merge["合并: Map&lt;name, {skill?, desc?}&gt;"]
         ScanSource --> Merge
     end
 
     subgraph p2 ["🔍 阶段 2: 存活性验证 (并行网络探测)"]
-        Probe["Promise.allSettled\n并行 POST /tools/invoke {}\n每个候选工具 · 5s 超时"]
-        Probe --> Filter["过滤:\nok || error.type ≠ 'not_found'"]
+        Probe["Promise.allSettled<br/>并行 POST /tools/invoke {}<br/>每个候选工具 · 5s 超时"]
+        Probe --> Filter["过滤:<br/>ok || error.type ≠ 'not_found'"]
     end
 
     subgraph p3 ["✅ 阶段 3: MCP 注册"]
         direction LR
-        DynTools["动态工具 (per-tool)\nfeishu_doc · feishu_wiki · …\n→ {action?, args_json?}"]
-        StaticTools["内置工具\nopenclaw_invoke\nopenclaw_discover\nopenclaw_skill"]
+        DynTools["动态工具 (per-tool)<br/>feishu_doc · feishu_wiki · …<br/>→ {action?, args_json?}"]
+        StaticTools["内置工具<br/>openclaw_invoke<br/>openclaw_discover<br/>openclaw_skill"]
     end
 
-    Merge -->|"Map&lt;name, meta&gt;\n候选 N 个"| Probe
-    Filter -->|"验证通过 M 个\n(M ≤ N)"| DynTools
+    Merge -->|"Map&lt;name, meta&gt;<br/>候选 N 个"| Probe
+    Filter -->|"验证通过 M 个<br/>(M ≤ N)"| DynTools
 
     style Merge fill:#2563eb,color:#fff
     style Probe fill:#7c3aed,color:#fff
@@ -502,24 +502,24 @@ cursor-agent 通过 stdout 输出 JSON lines，每行一个事件：
 
 ```mermaid
 flowchart LR
-    Input["📥 cursor-agent\nstdout JSON lines"] --> Parse["JSON.parse\n逐行解析"]
+    Input["📥 cursor-agent<br/>stdout JSON lines"] --> Parse["JSON.parse<br/>逐行解析"]
     Parse --> Switch{"event.type?"}
 
     Switch -->|"tool_call"| ToolBranch{"subtype?"}
-    ToolBranch -->|"started"| ToolStart["📊 tool:start 日志\n记录名称 · 参数 · call_id\n开始计时"]
-    ToolBranch -->|"completed"| ToolDone["📊 tool:done 日志\n耗时 · 成功/失败"]
+    ToolBranch -->|"started"| ToolStart["📊 tool:start 日志<br/>记录名称 · 参数 · call_id<br/>开始计时"]
+    ToolBranch -->|"completed"| ToolDone["📊 tool:done 日志<br/>耗时 · 成功/失败"]
 
-    Switch -->|"thinking"| ThinkBranch{"FORWARD_\nTHINKING?"}
-    ThinkBranch -->|"true"| ForwardThink["🧠 SSE:\nreasoning_content"]
+    Switch -->|"thinking"| ThinkBranch{"FORWARD_<br/>THINKING?"}
+    ThinkBranch -->|"true"| ForwardThink["🧠 SSE:<br/>reasoning_content"]
     ThinkBranch -->|"false"| Drop["🗑️ 丢弃"]
 
-    Switch -->|"text"| TextDelta["📝 SSE:\ncontent delta\n(实时推送)"]
+    Switch -->|"text"| TextDelta["📝 SSE:<br/>content delta<br/>(实时推送)"]
 
-    Switch -->|"result"| ResultBranch{"INSTANT_\nRESULT?"}
-    ResultBranch -->|"true"| InstantSend["⚡ 一次性发送\n零延迟"]
-    ResultBranch -->|"false"| ChunkedSend["📤 分块流式\n~200 chars/s"]
+    Switch -->|"result"| ResultBranch{"INSTANT_<br/>RESULT?"}
+    ResultBranch -->|"true"| InstantSend["⚡ 一次性发送<br/>零延迟"]
+    ResultBranch -->|"false"| ChunkedSend["📤 分块流式<br/>~200 chars/s"]
 
-    Switch -->|"任意含\nsession_id"| SaveSession["💾 setSession()\n持久化到磁盘"]
+    Switch -->|"任意含<br/>session_id"| SaveSession["💾 setSession()<br/>持久化到磁盘"]
 
     style Input fill:#ea580c,color:#fff
     style TextDelta fill:#2563eb,color:#fff
@@ -711,28 +711,28 @@ sequenceDiagram
 ```mermaid
 flowchart TD
     Req(["📨 新请求到达"])
-    Req --> ExplicitCheck{"body/header 含\n显式 session ID?"}
+    Req --> ExplicitCheck{"body/header 含<br/>显式 session ID?"}
 
-    ExplicitCheck -->|"_openclaw_session_id\nsession_id\nX-OpenClaw-Session-Id\nX-Session-Id"| ExplicitKey["✅ 使用显式 key"]
-    ExplicitCheck -->|"无"| MetaCheck{"消息含\nConversation info?"}
+    ExplicitCheck -->|"_openclaw_session_id<br/>session_id<br/>X-OpenClaw-Session-Id<br/>X-Session-Id"| ExplicitKey["✅ 使用显式 key"]
+    ExplicitCheck -->|"无"| MetaCheck{"消息含<br/>Conversation info?"}
 
-    MetaCheck -->|"有 sender_id\n或 group_channel"| AutoKey["🔄 自动推导 key\nauto:dm:{sender_id}\nauto:grp:{channel}:{topic}"]
-    MetaCheck -->|"无"| NoKey["❌ session=none\n每次全新会话"]
+    MetaCheck -->|"有 sender_id<br/>或 group_channel"| AutoKey["🔄 自动推导 key<br/>auto:dm:{sender_id}<br/>auto:grp:{channel}:{topic}"]
+    MetaCheck -->|"无"| NoKey["❌ session=none<br/>每次全新会话"]
 
     ExplicitKey --> Lookup
     AutoKey --> Lookup
-    Lookup["🔍 sessions.get(key)\n从 cursor-sessions.json"]
+    Lookup["🔍 sessions.get(key)<br/>从 cursor-sessions.json"]
     Lookup --> HasCursor{"有 cursorSessionId?"}
 
-    HasCursor -->|"有（历史会话）"| Resume["▶️ spawn --resume sessionId\n加载 store.db 历史"]
-    HasCursor -->|"无（首次对话）"| NewSession["🆕 spawn（无 --resume）\n创建新会话"]
+    HasCursor -->|"有（历史会话）"| Resume["▶️ spawn --resume sessionId<br/>加载 store.db 历史"]
+    HasCursor -->|"无（首次对话）"| NewSession["🆕 spawn（无 --resume）<br/>创建新会话"]
     NoKey --> NewSession
 
-    Resume --> AgentRun["🧠 cursor-agent 执行\n推理 + 工具调用"]
+    Resume --> AgentRun["🧠 cursor-agent 执行<br/>推理 + 工具调用"]
     NewSession --> AgentRun
 
-    AgentRun --> Save["💾 setSession(key, newSessionId)\n持久化到磁盘"]
-    AgentRun --> Exit["📤 返回响应\n子进程退出"]
+    AgentRun --> Save["💾 setSession(key, newSessionId)<br/>持久化到磁盘"]
+    AgentRun --> Exit["📤 返回响应<br/>子进程退出"]
 
     style ExplicitKey fill:#2563eb,color:#fff
     style AutoKey fill:#7c3aed,color:#fff
@@ -778,20 +778,20 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    GWStart(["🚀 Gateway 启动\nregister() 被调用"])
-    GWStart --> IsRunning{"isProxyRunning(port)?\ncurl /v1/health"}
+    GWStart(["🚀 Gateway 启动<br/>register() 被调用"])
+    GWStart --> IsRunning{"isProxyRunning(port)?<br/>curl /v1/health"}
 
     IsRunning -->|"❌ 未运行"| NeedStart["needRestart = true"]
-    IsRunning -->|"✅ 运行中"| FetchHealth["GET /v1/health\n获取 scriptHash"]
+    IsRunning -->|"✅ 运行中"| FetchHealth["GET /v1/health<br/>获取 scriptHash"]
 
-    FetchHealth --> CompareHash{"SHA-256 对比\nrunning vs installed"}
-    CompareHash -->|"✅ 哈希一致\n代码未变"| UpToDate["📋 日志: up-to-date\n保持运行"]
-    CompareHash -->|"❌ 哈希不同\n代码已更新"| NeedStart
+    FetchHealth --> CompareHash{"SHA-256 对比<br/>running vs installed"}
+    CompareHash -->|"✅ 哈希一致<br/>代码未变"| UpToDate["📋 日志: up-to-date<br/>保持运行"]
+    CompareHash -->|"❌ 哈希不同<br/>代码已更新"| NeedStart
 
-    NeedStart --> Kill["🔪 killPortProcess(port)\nlsof / netstat 跨平台"]
-    Kill --> Wait["⏳ Atomics.wait 300ms\n零 CPU 等待"]
-    Wait --> Spawn["🔄 spawn node streaming-proxy.mjs\n注入 CURSOR_PATH 等环境变量"]
-    Spawn --> Listen["✅ proxy 监听 :18790\n就绪"]
+    NeedStart --> Kill["🔪 killPortProcess(port)<br/>lsof / netstat 跨平台"]
+    Kill --> Wait["⏳ Atomics.wait 300ms<br/>零 CPU 等待"]
+    Wait --> Spawn["🔄 spawn node streaming-proxy.mjs<br/>注入 CURSOR_PATH 等环境变量"]
+    Spawn --> Listen["✅ proxy 监听 :18790<br/>就绪"]
 
     style GWStart fill:#0891b2,color:#fff
     style NeedStart fill:#ea580c,color:#fff

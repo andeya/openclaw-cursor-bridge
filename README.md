@@ -64,19 +64,19 @@ flowchart LR
 
     subgraph Core ["🔄 Bidirectional Bridge"]
         direction TB
-        GW["OpenClaw\nGateway"]
+        GW["OpenClaw<br/>Gateway"]
 
         subgraph ProxyBox ["⚡ Streaming Proxy :18790"]
-            Proxy["OpenAI-compatible API\n• Session auto-derive\n• InstantResult\n• scriptHash auto-restart"]
+            Proxy["OpenAI-compatible API<br/>• Session auto-derive<br/>• InstantResult<br/>• scriptHash auto-restart"]
         end
 
         subgraph MCPBox ["🔌 MCP Server (stdio)"]
-            MCP["Tool Gateway\n• Rich descriptions\n• Timeout + retry\n• Auto-discovery"]
+            MCP["Tool Gateway<br/>• Rich descriptions<br/>• Timeout + retry<br/>• Auto-discovery"]
         end
     end
 
     subgraph AI ["🧠 Cursor Agent"]
-        Agent["cursor-agent CLI\n--stream-partial-output\n--resume session"]
+        Agent["cursor-agent CLI<br/>--stream-partial-output<br/>--resume session"]
     end
 
     subgraph Tools ["🛠️ Plugin Tools"]

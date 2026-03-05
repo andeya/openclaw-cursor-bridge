@@ -64,19 +64,19 @@ flowchart LR
 
     subgraph Core ["🔄 双向桥接"]
         direction TB
-        GW["OpenClaw\nGateway"]
+        GW["OpenClaw<br/>Gateway"]
 
         subgraph ProxyBox ["⚡ Streaming Proxy :18790"]
-            Proxy["OpenAI 兼容 API\n• Session 自动推导\n• 即时结果\n• 脚本哈希自动重启"]
+            Proxy["OpenAI 兼容 API<br/>• Session 自动推导<br/>• 即时结果<br/>• 脚本哈希自动重启"]
         end
 
         subgraph MCPBox ["🔌 MCP Server (stdio)"]
-            MCP["工具网关\n• 丰富描述\n• 超时 + 重试\n• 自动发现"]
+            MCP["工具网关<br/>• 丰富描述<br/>• 超时 + 重试<br/>• 自动发现"]
         end
     end
 
     subgraph AI ["🧠 Cursor Agent"]
-        Agent["cursor-agent CLI\n--stream-partial-output\n--resume session"]
+        Agent["cursor-agent CLI<br/>--stream-partial-output<br/>--resume session"]
     end
 
     subgraph Tools ["🛠️ 插件工具"]

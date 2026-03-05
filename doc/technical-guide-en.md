@@ -83,14 +83,14 @@ flowchart LR
 
     subgraph pathA ["Path A: OpenClaw → Cursor (AI Backend)"]
         direction LR
-        GW_A["OpenClaw\nGateway"]
+        GW_A["OpenClaw<br/>Gateway"]
         subgraph ProxyDetail ["⚡ Streaming Proxy :18790"]
             direction TB
             API["OpenAI-compatible API"]
-            SessionMgr["Session auto-derive\n(meta → key → --resume)"]
+            SessionMgr["Session auto-derive<br/>(meta → key → --resume)"]
             API --- SessionMgr
         end
-        Agent["🧠 cursor-agent\n-p --stream-partial-output\n--trust --approve-mcps"]
+        Agent["🧠 cursor-agent<br/>-p --stream-partial-output<br/>--trust --approve-mcps"]
     end
 
     subgraph pathB ["Path B: Cursor → OpenClaw (Tool Calls)"]
@@ -98,28 +98,28 @@ flowchart LR
         subgraph MCPDetail ["🔌 MCP Server (stdio)"]
             direction TB
             MCPCore["Tool proxy + retry"]
-            Skills["Rich Instructions\n(extractSkillBrief)"]
+            Skills["Rich Instructions<br/>(extractSkillBrief)"]
             MCPCore --- Skills
         end
-        GW_B["Gateway\nREST API"]
+        GW_B["Gateway<br/>REST API"]
     end
 
     subgraph Tools ["🛠️ Plugin Ecosystem"]
         direction TB
-        T1["feishu_doc\nfeishu_wiki"]
-        T2["GitHub\nSlack"]
-        T3["Database\nCustom plugins"]
+        T1["feishu_doc<br/>feishu_wiki"]
+        T2["GitHub<br/>Slack"]
+        T3["Database<br/>Custom plugins"]
     end
 
     Channels -->|"User messages"| GW_A
-    GW_A -->|"POST /v1/chat/completions\n(with Conversation info metadata)"| API
-    SessionMgr -->|"spawn + stdin\n(--resume sessionId)"| Agent
-    Agent -->|"stdout: JSON lines\n(text/result/tool_call/session_id)"| API
-    API -->|"SSE real-time stream\ndata: {choices:[{delta:{content}}]}"| GW_A
+    GW_A -->|"POST /v1/chat/completions<br/>(with Conversation info metadata)"| API
+    SessionMgr -->|"spawn + stdin<br/>(--resume sessionId)"| Agent
+    Agent -->|"stdout: JSON lines<br/>(text/result/tool_call/session_id)"| API
+    API -->|"SSE real-time stream<br/>data: {choices:[{delta:{content}}]}"| GW_A
     GW_A -->|"Response"| Channels
 
-    Agent <-->|"MCP stdio\n(CallTool)"| MCPCore
-    MCPCore -->|"POST /tools/invoke\n{tool, args}"| GW_B
+    Agent <-->|"MCP stdio<br/>(CallTool)"| MCPCore
+    MCPCore -->|"POST /tools/invoke<br/>{tool, args}"| GW_B
     GW_B --> Tools
 
     style API fill:#2563eb,color:#fff,stroke:#1d4ed8
@@ -140,25 +140,25 @@ flowchart LR
 ```mermaid
 flowchart TB
     subgraph Orchestration ["🎛️ Orchestration Layer (runs at Gateway startup)"]
-        PluginEntry["<b>index.ts</b>\nPlugin entry · register() · CLI"]
-        Setup["<b>setup.ts</b>\nCursor detection · Model discovery\nMCP config · Format probe"]
-        Doctor["<b>doctor.ts</b>\n11 health checks"]
-        Cleanup["<b>cleanup.ts</b>\n3-layer uninstall cleanup"]
+        PluginEntry["<b>index.ts</b><br/>Plugin entry · register() · CLI"]
+        Setup["<b>setup.ts</b><br/>Cursor detection · Model discovery<br/>MCP config · Format probe"]
+        Doctor["<b>doctor.ts</b><br/>11 health checks"]
+        Cleanup["<b>cleanup.ts</b><br/>3-layer uninstall cleanup"]
     end
 
     subgraph Runtime ["⚙️ Runtime (long-running processes)"]
-        Proxy["<b>streaming-proxy.mjs</b>\nHTTP :18790 · Session management\nSSE stream · Tool call logs"]
-        MCPServer["<b>server.mjs</b>\nTool discovery · Rich instructions\nTimeout/retry · Cache"]
+        Proxy["<b>streaming-proxy.mjs</b><br/>HTTP :18790 · Session management<br/>SSE stream · Tool call logs"]
+        MCPServer["<b>server.mjs</b><br/>Tool discovery · Rich instructions<br/>Timeout/retry · Cache"]
     end
 
     subgraph External ["🌐 External Dependencies"]
-        GW["OpenClaw Gateway\nREST API :18789"]
-        Agent["cursor-agent CLI\n--stream-partial-output"]
-        CursorIDE["Cursor IDE\n(manages MCP lifecycle)"]
+        GW["OpenClaw Gateway<br/>REST API :18789"]
+        Agent["cursor-agent CLI<br/>--stream-partial-output"]
+        CursorIDE["Cursor IDE<br/>(manages MCP lifecycle)"]
     end
 
     PluginEntry -->|"runSetup()"| Setup
-    PluginEntry -->|"startProxy()\nscriptHash check"| Proxy
+    PluginEntry -->|"startProxy()<br/>scriptHash check"| Proxy
     PluginEntry -->|"runDoctorChecks()"| Doctor
     PluginEntry -->|"runCleanup()"| Cleanup
     Proxy -->|"spawn per request"| Agent
@@ -197,23 +197,23 @@ The MCP Server communicates with Cursor IDE via stdio (launched by `~/.cursor/mc
 ```mermaid
 flowchart TD
     Start(["🚀 register(api) called"])
-    Start --> IsUninstall{"argv contains\nuninstall / upgrade?"}
+    Start --> IsUninstall{"argv contains<br/>uninstall / upgrade?"}
     IsUninstall -->|"yes"| SkipSetup["⏭️ Skip setup and proxy"]
 
-    IsUninstall -->|"no"| RunSetup["runSetup(ctx)\nCursor detection · Model discovery · MCP write"]
-    RunSetup --> SyncProvider{"Provider config\nchanged?"}
-    SyncProvider -->|"JSON.stringify\nsame"| LogUnchanged["📋 Log: unchanged\nskip write"]
-    SyncProvider -->|"different"| WriteConfig["💾 writeConfigFile(patch)\nSync models + agents"]
+    IsUninstall -->|"no"| RunSetup["runSetup(ctx)<br/>Cursor detection · Model discovery · MCP write"]
+    RunSetup --> SyncProvider{"Provider config<br/>changed?"}
+    SyncProvider -->|"JSON.stringify<br/>same"| LogUnchanged["📋 Log: unchanged<br/>skip write"]
+    SyncProvider -->|"different"| WriteConfig["💾 writeConfigFile(patch)<br/>Sync models + agents"]
 
     WriteConfig --> CheckProxy
     LogUnchanged --> CheckProxy
-    CheckProxy{"Proxy\nrunning?"}
-    CheckProxy -->|"not running"| StartProxy["🔄 startProxy()\nkill → wait → spawn"]
-    CheckProxy -->|"running"| HashCheck{"scriptHash\nmatches?"}
+    CheckProxy{"Proxy<br/>running?"}
+    CheckProxy -->|"not running"| StartProxy["🔄 startProxy()<br/>kill → wait → spawn"]
+    CheckProxy -->|"running"| HashCheck{"scriptHash<br/>matches?"}
     HashCheck -->|"SHA-256 match"| LogUpToDate["✅ Log: up-to-date"]
-    HashCheck -->|"hash differs\ncode updated"| StartProxy
+    HashCheck -->|"hash differs<br/>code updated"| StartProxy
 
-    StartProxy --> RegisterCLI["📝 Register CLI commands\nsetup · doctor · status\nupgrade · uninstall · proxy"]
+    StartProxy --> RegisterCLI["📝 Register CLI commands<br/>setup · doctor · status<br/>upgrade · uninstall · proxy"]
     LogUpToDate --> RegisterCLI
     SkipSetup --> RegisterCLI
 
@@ -344,25 +344,25 @@ The MCP Server is the most complex module in this project. It is responsible for
 ```mermaid
 flowchart TD
     subgraph p1 ["📂 Phase 1: Candidate Discovery (disk I/O, 60s cache)"]
-        ReadConfig["Read openclaw.json\n→ get plugin install paths"] --> ScanSkills["Scan SKILL.md\n→ tool names + full docs"]
-        ReadConfig --> ScanSource["Scan src/*.ts\n→ name/description pattern match"]
+        ReadConfig["Read openclaw.json<br/>→ get plugin install paths"] --> ScanSkills["Scan SKILL.md<br/>→ tool names + full docs"]
+        ReadConfig --> ScanSource["Scan src/*.ts<br/>→ name/description pattern match"]
         ScanSkills --> Merge["Merge: Map&lt;name, {skill?, desc?}&gt;"]
         ScanSource --> Merge
     end
 
     subgraph p2 ["🔍 Phase 2: Liveness Verification (parallel network probe)"]
-        Probe["Promise.allSettled\nParallel POST /tools/invoke {}\nper candidate · 5s timeout"]
-        Probe --> Filter["Filter:\nok || error.type ≠ 'not_found'"]
+        Probe["Promise.allSettled<br/>Parallel POST /tools/invoke {}<br/>per candidate · 5s timeout"]
+        Probe --> Filter["Filter:<br/>ok || error.type ≠ 'not_found'"]
     end
 
     subgraph p3 ["✅ Phase 3: MCP Registration"]
         direction LR
-        DynTools["Dynamic tools (per-tool)\nfeishu_doc · feishu_wiki · …\n→ {action?, args_json?}"]
-        StaticTools["Built-in tools\nopenclaw_invoke\nopenclaw_discover\nopenclaw_skill"]
+        DynTools["Dynamic tools (per-tool)<br/>feishu_doc · feishu_wiki · …<br/>→ {action?, args_json?}"]
+        StaticTools["Built-in tools<br/>openclaw_invoke<br/>openclaw_discover<br/>openclaw_skill"]
     end
 
-    Merge -->|"Map&lt;name, meta&gt;\nN candidates"| Probe
-    Filter -->|"M verified\n(M ≤ N)"| DynTools
+    Merge -->|"Map&lt;name, meta&gt;<br/>N candidates"| Probe
+    Filter -->|"M verified<br/>(M ≤ N)"| DynTools
 
     style Merge fill:#2563eb,color:#fff
     style Probe fill:#7c3aed,color:#fff
@@ -502,24 +502,24 @@ cursor-agent outputs JSON lines via stdout, one event per line:
 
 ```mermaid
 flowchart LR
-    Input["📥 cursor-agent\nstdout JSON lines"] --> Parse["JSON.parse\nline-by-line"]
+    Input["📥 cursor-agent<br/>stdout JSON lines"] --> Parse["JSON.parse<br/>line-by-line"]
     Parse --> Switch{"event.type?"}
 
     Switch -->|"tool_call"| ToolBranch{"subtype?"}
-    ToolBranch -->|"started"| ToolStart["📊 tool:start log\nrecord name · params · call_id\nstart timer"]
-    ToolBranch -->|"completed"| ToolDone["📊 tool:done log\nduration · success/fail"]
+    ToolBranch -->|"started"| ToolStart["📊 tool:start log<br/>record name · params · call_id<br/>start timer"]
+    ToolBranch -->|"completed"| ToolDone["📊 tool:done log<br/>duration · success/fail"]
 
-    Switch -->|"thinking"| ThinkBranch{"FORWARD_\nTHINKING?"}
-    ThinkBranch -->|"true"| ForwardThink["🧠 SSE:\nreasoning_content"]
+    Switch -->|"thinking"| ThinkBranch{"FORWARD_<br/>THINKING?"}
+    ThinkBranch -->|"true"| ForwardThink["🧠 SSE:<br/>reasoning_content"]
     ThinkBranch -->|"false"| Drop["🗑️ Discard"]
 
-    Switch -->|"text"| TextDelta["📝 SSE:\ncontent delta\n(real-time push)"]
+    Switch -->|"text"| TextDelta["📝 SSE:<br/>content delta<br/>(real-time push)"]
 
-    Switch -->|"result"| ResultBranch{"INSTANT_\nRESULT?"}
-    ResultBranch -->|"true"| InstantSend["⚡ Send in one shot\nzero delay"]
-    ResultBranch -->|"false"| ChunkedSend["📤 Chunked stream\n~200 chars/s"]
+    Switch -->|"result"| ResultBranch{"INSTANT_<br/>RESULT?"}
+    ResultBranch -->|"true"| InstantSend["⚡ Send in one shot<br/>zero delay"]
+    ResultBranch -->|"false"| ChunkedSend["📤 Chunked stream<br/>~200 chars/s"]
 
-    Switch -->|"any with\nsession_id"| SaveSession["💾 setSession()\npersist to disk"]
+    Switch -->|"any with<br/>session_id"| SaveSession["💾 setSession()<br/>persist to disk"]
 
     style Input fill:#ea580c,color:#fff
     style TextDelta fill:#2563eb,color:#fff
@@ -711,28 +711,28 @@ sequenceDiagram
 ```mermaid
 flowchart TD
     Req(["📨 New request arrives"])
-    Req --> ExplicitCheck{"body/header has\nexplicit session ID?"}
+    Req --> ExplicitCheck{"body/header has<br/>explicit session ID?"}
 
-    ExplicitCheck -->|"_openclaw_session_id\nsession_id\nX-OpenClaw-Session-Id\nX-Session-Id"| ExplicitKey["✅ Use explicit key"]
-    ExplicitCheck -->|"none"| MetaCheck{"Message has\nConversation info?"}
+    ExplicitCheck -->|"_openclaw_session_id<br/>session_id<br/>X-OpenClaw-Session-Id<br/>X-Session-Id"| ExplicitKey["✅ Use explicit key"]
+    ExplicitCheck -->|"none"| MetaCheck{"Message has<br/>Conversation info?"}
 
-    MetaCheck -->|"has sender_id\nor group_channel"| AutoKey["🔄 Auto-derive key\nauto:dm:{sender_id}\nauto:grp:{channel}:{topic}"]
-    MetaCheck -->|"none"| NoKey["❌ session=none\nfresh session each time"]
+    MetaCheck -->|"has sender_id<br/>or group_channel"| AutoKey["🔄 Auto-derive key<br/>auto:dm:{sender_id}<br/>auto:grp:{channel}:{topic}"]
+    MetaCheck -->|"none"| NoKey["❌ session=none<br/>fresh session each time"]
 
     ExplicitKey --> Lookup
     AutoKey --> Lookup
-    Lookup["🔍 sessions.get(key)\nfrom cursor-sessions.json"]
+    Lookup["🔍 sessions.get(key)<br/>from cursor-sessions.json"]
     Lookup --> HasCursor{"Has cursorSessionId?"}
 
-    HasCursor -->|"yes (existing session)"| Resume["▶️ spawn --resume sessionId\nload store.db history"]
-    HasCursor -->|"no (first turn)"| NewSession["🆕 spawn (no --resume)\ncreate new session"]
+    HasCursor -->|"yes (existing session)"| Resume["▶️ spawn --resume sessionId<br/>load store.db history"]
+    HasCursor -->|"no (first turn)"| NewSession["🆕 spawn (no --resume)<br/>create new session"]
     NoKey --> NewSession
 
-    Resume --> AgentRun["🧠 cursor-agent executes\nreasoning + tool calls"]
+    Resume --> AgentRun["🧠 cursor-agent executes<br/>reasoning + tool calls"]
     NewSession --> AgentRun
 
-    AgentRun --> Save["💾 setSession(key, newSessionId)\npersist to disk"]
-    AgentRun --> Exit["📤 Return response\nchild process exits"]
+    AgentRun --> Save["💾 setSession(key, newSessionId)<br/>persist to disk"]
+    AgentRun --> Exit["📤 Return response<br/>child process exits"]
 
     style ExplicitKey fill:#2563eb,color:#fff
     style AutoKey fill:#7c3aed,color:#fff
@@ -778,20 +778,20 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    GWStart(["🚀 Gateway starts\nregister() called"])
-    GWStart --> IsRunning{"isProxyRunning(port)?\ncurl /v1/health"}
+    GWStart(["🚀 Gateway starts<br/>register() called"])
+    GWStart --> IsRunning{"isProxyRunning(port)?<br/>curl /v1/health"}
 
     IsRunning -->|"❌ not running"| NeedStart["needRestart = true"]
-    IsRunning -->|"✅ running"| FetchHealth["GET /v1/health\nget scriptHash"]
+    IsRunning -->|"✅ running"| FetchHealth["GET /v1/health<br/>get scriptHash"]
 
-    FetchHealth --> CompareHash{"SHA-256 compare\nrunning vs installed"}
-    CompareHash -->|"✅ hash match\ncode unchanged"| UpToDate["📋 Log: up-to-date\nkeep running"]
-    CompareHash -->|"❌ hash differs\ncode updated"| NeedStart
+    FetchHealth --> CompareHash{"SHA-256 compare<br/>running vs installed"}
+    CompareHash -->|"✅ hash match<br/>code unchanged"| UpToDate["📋 Log: up-to-date<br/>keep running"]
+    CompareHash -->|"❌ hash differs<br/>code updated"| NeedStart
 
-    NeedStart --> Kill["🔪 killPortProcess(port)\nlsof / netstat cross-platform"]
-    Kill --> Wait["⏳ Atomics.wait 300ms\nzero CPU wait"]
-    Wait --> Spawn["🔄 spawn node streaming-proxy.mjs\ninject CURSOR_PATH etc env vars"]
-    Spawn --> Listen["✅ proxy listening :18790\nready"]
+    NeedStart --> Kill["🔪 killPortProcess(port)<br/>lsof / netstat cross-platform"]
+    Kill --> Wait["⏳ Atomics.wait 300ms<br/>zero CPU wait"]
+    Wait --> Spawn["🔄 spawn node streaming-proxy.mjs<br/>inject CURSOR_PATH etc env vars"]
+    Spawn --> Listen["✅ proxy listening :18790<br/>ready"]
 
     style GWStart fill:#0891b2,color:#fff
     style NeedStart fill:#ea580c,color:#fff
