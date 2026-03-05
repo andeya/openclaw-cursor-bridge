@@ -125,7 +125,7 @@ Sessions are persisted to disk and reused via `--resume` for faster subsequent r
 - **Thinking forwarding** — optionally stream LLM reasoning via `reasoning_content` (OpenAI-compatible `CURSOR_PROXY_FORWARD_THINKING=true`)
 - **Rich tool descriptions** — MCP server instructions include token extraction rules, exact action keys, and parameter examples from SKILL.md — reducing unnecessary `openclaw_skill` calls
 - **Tool call logging** — proxy logs every tool invocation with name, arguments summary, duration, and call ID for diagnostics
-- **Tool auto-discovery** — source scanning + REST API parallel verification; cached with 60s TTL
+- **Tool auto-discovery** — disk-based registration from SKILL.md at startup (no Gateway dependency); background verification for diagnostics; cached with 60s TTL
 - **Session auto-derive** — session keys automatically derived from conversation metadata (sender/group/topic) in user messages; no explicit session ID required from Gateway
 - **Session persistence** — cursor-agent sessions persisted to disk (`~/.openclaw/cursor-sessions.json`); explicit session IDs also accepted via body fields or HTTP headers (`X-OpenClaw-Session-Id`, `X-Session-Id`)
 - **Auto-restart on upgrade** — proxy exposes a `scriptHash` in `/v1/health`; gateway compares it against the installed script hash and auto-restarts when code changes

@@ -339,7 +339,7 @@ Before writing, `args` and `env` fields are compared — if already consistent, 
 
 The MCP Server is the most complex module in this project. It is responsible for exposing all OpenClaw plugin tools as MCP tools for native invocation by Cursor IDE.
 
-#### Three-Phase Tool Discovery
+#### Tool Discovery & Registration
 
 ```mermaid
 flowchart TD
@@ -350,25 +350,25 @@ flowchart TD
         ScanSource --> Merge
     end
 
-    subgraph p2 ["🔍 Phase 2: Liveness Verification (parallel network probe)"]
-        Probe["Promise.allSettled<br/>Parallel POST /tools/invoke {}<br/>per candidate · 5s timeout"]
-        Probe --> Filter["Filter:<br/>ok || error.type ≠ 'not_found'"]
-    end
-
-    subgraph p3 ["✅ Phase 3: MCP Registration"]
+    subgraph p2 ["✅ Phase 2: Immediate MCP Registration (no Gateway dependency)"]
         direction LR
         DynTools["Dynamic tools (per-tool)<br/>feishu_doc · feishu_wiki · …<br/>→ {action?, args_json?}"]
         StaticTools["Built-in tools<br/>openclaw_invoke<br/>openclaw_discover<br/>openclaw_skill"]
     end
 
-    Merge -->|"Map&lt;name, meta&gt;<br/>N candidates"| Probe
-    Filter -->|"M verified<br/>(M ≤ N)"| DynTools
+    subgraph p3 ["🔍 Background: Liveness Verification (non-blocking)"]
+        Probe["Promise.allSettled<br/>Parallel POST /tools/invoke {}<br/>per candidate · 5s timeout"]
+        Probe --> LogResult["Log: verified / missing<br/>(diagnostics only)"]
+    end
+
+    Merge -->|"Map&lt;name, meta&gt;<br/>N candidates"| DynTools
+    DynTools -.->|"async, non-blocking"| Probe
 
     style Merge fill:#2563eb,color:#fff
-    style Probe fill:#7c3aed,color:#fff
-    style Filter fill:#7c3aed,color:#fff
     style DynTools fill:#059669,color:#fff
     style StaticTools fill:#059669,color:#fff
+    style Probe fill:#7c3aed,color:#fff
+    style LogResult fill:#7c3aed,color:#fff
 ```
 
 **Phase 1: `discoverCandidateTools()`**
@@ -377,13 +377,13 @@ Scans candidate tools from two sources (pure disk I/O, no Gateway dependency):
 - **SKILL.md files**: Reads subdirectories under each plugin's `skills/` directory, converts directory names to tool names (e.g., `feishu-doc` → `feishu_doc`), reads the full SKILL.md content (including inlined `references/*.md`)
 - **Source scanning** (fallback): Parses `name: "tool_name"` and `description: "..."` patterns in `src/*.ts` files, extracting tool names and descriptions not already covered by SKILL.md
 
-**Phase 2: `discoverVerifiedTools()`**
+**Phase 2: Immediate Registration**
 
-For each candidate tool, issues a REST probe (`POST /tools/invoke` with empty args) to confirm the tool is actually registered on the Gateway. Uses `Promise.allSettled` for parallel probing with a 5-second timeout.
+All candidate tools are registered to the MCP Server immediately via `server.tool(name, description, schema, handler)`, without waiting for Gateway liveness probes. This avoids a startup race condition where the MCP server starts before the Gateway is ready. Each tool uses a unified schema of `{ action?: string, args_json?: string }`. The description is composed from the SKILL.md frontmatter description plus a skill usage hint. If the Gateway is not yet ready when a tool is called, `invokeGatewayTool`'s built-in retry logic (2 retries with backoff) handles it gracefully.
 
-**Phase 3: Dynamic Registration**
+**Background: `discoverVerifiedTools()`**
 
-Verified tools are registered to the MCP Server via `server.tool(name, description, schema, handler)`. Each tool uses a unified schema of `{ action?: string, args_json?: string }`. The description is composed from the SKILL.md frontmatter description plus a skill usage hint.
+After registration, a non-blocking background probe verifies which tools are actually available on the Gateway. This is purely for diagnostics logging — missing tools are logged as warnings but remain registered (they will work once the Gateway is ready).
 
 #### Caching Layer
 

@@ -454,23 +454,6 @@ const registeredNames = new Set();
 log("info", `Starting openclaw-gateway MCP server v${VERSION}`);
 log("info", `Gateway: ${GATEWAY_URL}`);
 
-/** @type {Map<string, { skill?: string, description?: string }>} */
-let verifiedTools = new Map();
-let gatewayMeta = {};
-
-try {
-  const candidateTools = getCachedCandidateTools();
-  const [verified, meta] = await Promise.all([
-    discoverVerifiedTools(candidateTools),
-    fetchToolDescriptions(),
-  ]);
-  verifiedTools = verified;
-  gatewayMeta = meta;
-  log("info", `Discovered ${verifiedTools.size} tools: ${[...verifiedTools.keys()].join(", ") || "(none)"}`);
-} catch (err) {
-  log("error", `Tool discovery failed: ${err.message}`);
-}
-
 // Lazy-loaded skill content cache (reads from disk, independent of gateway)
 /** @type {Map<string, string> | null} */
 let _skillsCache = null;
@@ -484,7 +467,20 @@ function getSkillsByTool() {
   return _skillsCache;
 }
 
-for (const [name, localMeta] of verifiedTools) {
+// Register dynamic tools from disk-based candidates immediately, without
+// waiting for Gateway liveness probes. This avoids a startup race condition
+// where the MCP server starts before the Gateway is ready, resulting in zero
+// dynamic tools. If a tool's Gateway handler is not yet available when called,
+// invokeGatewayTool's retry logic will handle it gracefully.
+let gatewayMeta = {};
+try {
+  gatewayMeta = await fetchToolDescriptions();
+} catch {
+  log("warn", "Could not fetch tool descriptions from gateway (may not be ready yet)");
+}
+
+const candidateToolsForReg = getCachedCandidateTools();
+for (const [name, localMeta] of candidateToolsForReg) {
   const gwMeta = gatewayMeta[name];
   const skillContent = localMeta.skill || getSkillsByTool().get(name);
   const hasSkill = !!skillContent;
@@ -518,6 +514,17 @@ for (const [name, localMeta] of verifiedTools) {
   );
   registeredNames.add(name);
 }
+log("info", `Registered ${registeredNames.size} dynamic tools from disk: ${[...registeredNames].join(", ") || "(none)"}`);
+
+// Background: verify which tools are actually available on the gateway (non-blocking, for logging only)
+discoverVerifiedTools(candidateToolsForReg).then((verified) => {
+  const missing = [...candidateToolsForReg.keys()].filter((n) => !verified.has(n));
+  if (missing.length > 0) {
+    log("warn", `Tools registered but not yet on gateway: ${missing.join(", ")} (will retry on invocation)`);
+  } else {
+    log("info", `All ${verified.size} registered tools verified on gateway`);
+  }
+}).catch(() => {});
 
 server.tool(
   "openclaw_invoke",

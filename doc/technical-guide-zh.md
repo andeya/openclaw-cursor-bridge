@@ -339,7 +339,7 @@ export function discoverCursorModels(
 
 MCP Server 是本项目最复杂的模块，负责将 OpenClaw 的所有插件工具暴露为 MCP 工具，让 Cursor IDE 原生调用。
 
-#### 工具发现三阶段
+#### 工具发现与注册
 
 ```mermaid
 flowchart TD
@@ -350,25 +350,25 @@ flowchart TD
         ScanSource --> Merge
     end
 
-    subgraph p2 ["🔍 阶段 2: 存活性验证 (并行网络探测)"]
-        Probe["Promise.allSettled<br/>并行 POST /tools/invoke {}<br/>每个候选工具 · 5s 超时"]
-        Probe --> Filter["过滤:<br/>ok || error.type ≠ 'not_found'"]
-    end
-
-    subgraph p3 ["✅ 阶段 3: MCP 注册"]
+    subgraph p2 ["✅ 阶段 2: 即时 MCP 注册 (不依赖 Gateway)"]
         direction LR
         DynTools["动态工具 (per-tool)<br/>feishu_doc · feishu_wiki · …<br/>→ {action?, args_json?}"]
         StaticTools["内置工具<br/>openclaw_invoke<br/>openclaw_discover<br/>openclaw_skill"]
     end
 
-    Merge -->|"Map&lt;name, meta&gt;<br/>候选 N 个"| Probe
-    Filter -->|"验证通过 M 个<br/>(M ≤ N)"| DynTools
+    subgraph p3 ["🔍 后台: 存活性验证 (非阻塞)"]
+        Probe["Promise.allSettled<br/>并行 POST /tools/invoke {}<br/>每个候选工具 · 5s 超时"]
+        Probe --> LogResult["日志: 已验证 / 缺失<br/>(仅用于诊断)"]
+    end
+
+    Merge -->|"Map&lt;name, meta&gt;<br/>候选 N 个"| DynTools
+    DynTools -.->|"异步, 非阻塞"| Probe
 
     style Merge fill:#2563eb,color:#fff
-    style Probe fill:#7c3aed,color:#fff
-    style Filter fill:#7c3aed,color:#fff
     style DynTools fill:#059669,color:#fff
     style StaticTools fill:#059669,color:#fff
+    style Probe fill:#7c3aed,color:#fff
+    style LogResult fill:#7c3aed,color:#fff
 ```
 
 **阶段 1: `discoverCandidateTools()`**
@@ -377,13 +377,13 @@ flowchart TD
 - **SKILL.md 文件**：读取每个插件 `skills/` 目录下的子目录，目录名转换为工具名（如 `feishu-doc` → `feishu_doc`），读取完整 SKILL.md 内容（含内联的 `references/*.md`）
 - **源码扫描**（fallback）：解析 `src/*.ts` 文件中的 `name: "tool_name"` 和 `description: "..."` 模式，提取未被 SKILL.md 覆盖的工具名和描述
 
-**阶段 2: `discoverVerifiedTools()`**
+**阶段 2: 即时注册**
 
-对每个候选工具发起 REST probe（`POST /tools/invoke` 带空参数），确认 Gateway 上确实注册了该工具。使用 `Promise.allSettled` 并行探测，5 秒超时。
+所有候选工具立即通过 `server.tool(name, description, schema, handler)` 注册到 MCP Server，无需等待 Gateway 探活。这避免了 MCP Server 先于 Gateway 启动时的竞争条件。每个工具的 schema 统一为 `{ action?: string, args_json?: string }`。description 由 SKILL.md frontmatter 描述 + skill 使用提示组成。如果工具被调用时 Gateway 尚未就绪，`invokeGatewayTool` 内置的重试逻辑（2 次重试 + 退避）会自动处理。
 
-**阶段 3: 动态注册**
+**后台: `discoverVerifiedTools()`**
 
-通过 `server.tool(name, description, schema, handler)` 将验证通过的工具注册到 MCP Server。每个工具的 schema 统一为 `{ action?: string, args_json?: string }`。description 由 SKILL.md frontmatter 描述 + skill 使用提示组成。
+注册完成后，非阻塞后台探测验证哪些工具在 Gateway 上实际可用。这仅用于诊断日志——缺失的工具会记录为警告但保持注册状态（Gateway 就绪后即可正常工作）。
 
 #### 缓存层
 

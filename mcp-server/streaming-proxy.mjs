@@ -217,7 +217,7 @@ function spawnCursorAgent(userMsg, sessionKey, requestModel) {
 
   const child = spawn(CURSOR_PATH, args, {
     cwd: WORKSPACE_DIR || undefined,
-    env: { ...process.env, SHELL: "/bin/bash" },
+    env: { ...process.env, ...(process.platform !== "win32" && { SHELL: process.env.SHELL || "/bin/bash" }) },
     stdio: ["pipe", "pipe", "pipe"],
   });
   child.stdin.write(userMsg);
@@ -595,5 +595,16 @@ server.listen(PORT, "127.0.0.1", () => {
   if (WORKSPACE_DIR) log("info", `Workspace: ${WORKSPACE_DIR}`);
 });
 
-process.on("SIGTERM", () => { server.close(); process.exit(0); });
-process.on("SIGINT", () => { server.close(); process.exit(0); });
+function gracefulShutdown(signal) {
+  log("info", `Received ${signal}, shutting down gracefully...`);
+  server.close(() => {
+    log("info", "All connections closed, exiting.");
+    process.exit(0);
+  });
+  setTimeout(() => {
+    log("warn", "Graceful shutdown timed out after 10s, forcing exit.");
+    process.exit(1);
+  }, 10_000).unref();
+}
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));

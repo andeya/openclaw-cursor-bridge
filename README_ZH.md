@@ -125,7 +125,7 @@ flowchart LR
 - **推理过程转发** — 可选通过 `reasoning_content` 流式输出 LLM 推理过程（`CURSOR_PROXY_FORWARD_THINKING=true`）
 - **丰富工具描述** — MCP 服务器指令包含 token 提取规则、精确 action 键和参数示例（来自 SKILL.md），减少不必要的 `openclaw_skill` 调用
 - **工具调用日志** — proxy 记录每个工具调用的名称、参数摘要、耗时和 call ID，便于诊断
-- **工具自动发现** — 源码扫描 + REST API 并行验证；60s TTL 缓存
+- **工具自动发现** — 启动时从磁盘 SKILL.md 直接注册（不依赖 Gateway）；后台异步验证用于诊断；60s TTL 缓存
 - **Session 自动推导** — 自动从消息元数据（sender/group/topic）推导 session key，Gateway 无需显式传递 session ID
 - **会话持久化** — cursor-agent 会话持久化到磁盘（`~/.openclaw/cursor-sessions.json`）；也支持通过 body 字段或 HTTP 头（`X-OpenClaw-Session-Id`、`X-Session-Id`）显式传递
 - **升级自动重启** — proxy 在 `/v1/health` 暴露 `scriptHash`；Gateway 比较哈希值，代码变更后自动重启

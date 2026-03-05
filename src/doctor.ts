@@ -80,7 +80,7 @@ export function runDoctorChecks(opts: {
   checks.push(
     pluginVersion
       ? { ok: true, label: "Plugin version", detail: `v${pluginVersion}` }
-      : { ok: true, label: "Plugin version", detail: "unknown" },
+      : { ok: false, label: "Plugin version", detail: "unknown (package.json missing or unreadable)" },
   );
 
   // Cursor Agent CLI

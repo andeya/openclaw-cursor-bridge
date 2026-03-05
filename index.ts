@@ -266,8 +266,8 @@ const plugin = {
             };
 
             if (!providerExists) {
-              const hasModel = (id: string) => discovered.some((m) => m.id === id);
-              const primary = (pluginConfig.model as string) || (hasModel("sonnet-4.6") ? "sonnet-4.6" : discovered[0]?.id || "auto");
+              const defaultModel = discovered.find((m) => m.isDefault);
+              const primary = (pluginConfig.model as string) || defaultModel?.id || discovered[0]?.id || "auto";
               const fallbacks = discovered.filter((m) => m.id !== primary).map((m) => `${PROVIDER_ID}/${m.id}`);
               (patch as any).agents = {
                 ...(config.agents || {}),
