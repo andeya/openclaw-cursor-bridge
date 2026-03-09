@@ -22,6 +22,13 @@
 
 **openclaw-cursor-brain** 是一个 [OpenClaw](https://github.com/openclaw/openclaw) 插件，将 [Cursor Agent CLI](https://cursor.sh) 作为实时流式 AI 后端，通过 [MCP](https://modelcontextprotocol.io) 连接所有插件工具，让 AI 原生调用飞书、Slack、GitHub 等能力。
 
+## 前置条件
+
+- [Cursor IDE](https://cursor.sh) 已安装并至少启动过一次
+- Cursor Agent CLI 已启用：打开 Cursor → `Cmd+Shift+P` → 输入 **Install 'cursor' command** → 回车（安装后终端可用 `cursor-agent` 或 `agent` 命令）
+- [OpenClaw](https://github.com/openclaw/openclaw) 已全局安装（`npm i -g openclaw`）
+- Node.js ≥ 18
+
 ## 快速开始
 
 ```bash
@@ -153,16 +160,16 @@ flowchart LR
 <details>
 <summary><strong>环境变量</strong></summary>
 
-| 变量                            | 默认值   | 说明                                                  |
-| ------------------------------- | -------- | ----------------------------------------------------- |
-| `OPENCLAW_TOOL_TIMEOUT_MS`      | `60000`  | 工具调用超时（毫秒）                                  |
-| `OPENCLAW_TOOL_RETRY_COUNT`     | `2`      | 瞬态错误重试次数                                      |
-| `CURSOR_PROXY_INSTANT_RESULT`   | `true`   | 批量结果即时发送（不分块模拟流式）                    |
-| `CURSOR_PROXY_FORWARD_THINKING` | `false`  | 将 LLM 推理过程转发为 `reasoning_content`             |
-| `CURSOR_PROXY_STREAM_SPEED`     | `200`    | 分块流式速度（字符/秒，仅 `INSTANT_RESULT=false` 时） |
-| `CURSOR_PROXY_REQUEST_TIMEOUT`  | `300000` | 单请求超时（毫秒，默认 5 分钟）                       |
-| `CURSOR_PROXY_MAX_CONSECUTIVE_FAILURES` | `5` | 连续失败上限，超过后 proxy 自退出触发重启       |
-| `CURSOR_PROXY_API_KEY`          | _（无）_ | 独立模式 API Key 认证                                 |
+| 变量                                    | 默认值   | 说明                                                  |
+| --------------------------------------- | -------- | ----------------------------------------------------- |
+| `OPENCLAW_TOOL_TIMEOUT_MS`              | `60000`  | 工具调用超时（毫秒）                                  |
+| `OPENCLAW_TOOL_RETRY_COUNT`             | `2`      | 瞬态错误重试次数                                      |
+| `CURSOR_PROXY_INSTANT_RESULT`           | `true`   | 批量结果即时发送（不分块模拟流式）                    |
+| `CURSOR_PROXY_FORWARD_THINKING`         | `false`  | 将 LLM 推理过程转发为 `reasoning_content`             |
+| `CURSOR_PROXY_STREAM_SPEED`             | `200`    | 分块流式速度（字符/秒，仅 `INSTANT_RESULT=false` 时） |
+| `CURSOR_PROXY_REQUEST_TIMEOUT`          | `300000` | 单请求超时（毫秒，默认 5 分钟）                       |
+| `CURSOR_PROXY_MAX_CONSECUTIVE_FAILURES` | `5`      | 连续失败上限，超过后 proxy 自退出触发重启             |
+| `CURSOR_PROXY_API_KEY`                  | _（无）_ | 独立模式 API Key 认证                                 |
 
 </details>
 

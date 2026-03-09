@@ -22,6 +22,13 @@
 
 **openclaw-cursor-brain** is an [OpenClaw](https://github.com/openclaw/openclaw) plugin that turns [Cursor Agent CLI](https://cursor.sh) into a fully-integrated, streaming AI backend via [MCP](https://modelcontextprotocol.io). All OpenClaw plugin tools become natively accessible to Cursor — and vice versa.
 
+## Prerequisites
+
+- [Cursor IDE](https://cursor.sh) installed and launched at least once
+- Cursor Agent CLI enabled: open Cursor → `Cmd+Shift+P` → type **Install 'cursor' command** → Enter (after this, `cursor-agent` or `agent` is available in the terminal)
+- [OpenClaw](https://github.com/openclaw/openclaw) installed globally (`npm i -g openclaw`)
+- Node.js ≥ 18
+
 ## Quick Start
 
 ```bash
@@ -141,43 +148,43 @@ Sessions are persisted to disk and reused via `--resume` for faster subsequent r
 
 In `openclaw.json` under `plugins.entries.openclaw-cursor-brain.config`:
 
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `cursorPath` | string | auto-detect | Path to cursor-agent binary |
-| `model` | string | interactive | Primary model (override to skip interactive selection) |
+| Option          | Type   | Default     | Description                                                                      |
+| --------------- | ------ | ----------- | -------------------------------------------------------------------------------- |
+| `cursorPath`    | string | auto-detect | Path to cursor-agent binary                                                      |
+| `model`         | string | interactive | Primary model (override to skip interactive selection)                           |
 | `fallbackModel` | string | interactive | Fallback model override (interactive selection provides ordered multi-fallbacks) |
-| `cursorModel` | string | `""` (auto) | Direct `cursor-agent --model` override (e.g. `sonnet-4.6`, `opus-4.6-thinking`) |
-| `outputFormat` | string | auto-detect | `"stream-json"` or `"json"` |
-| `proxyPort` | number | `18790` | Streaming proxy port |
+| `cursorModel`   | string | `""` (auto) | Direct `cursor-agent --model` override (e.g. `sonnet-4.6`, `opus-4.6-thinking`)  |
+| `outputFormat`  | string | auto-detect | `"stream-json"` or `"json"`                                                      |
+| `proxyPort`     | number | `18790`     | Streaming proxy port                                                             |
 
 <details>
 <summary><strong>Environment variables</strong></summary>
 
-| Variable | Default | Description |
-|---|---|---|
-| `OPENCLAW_TOOL_TIMEOUT_MS` | `60000` | Tool call timeout (ms) |
-| `OPENCLAW_TOOL_RETRY_COUNT` | `2` | Max retries on transient errors |
-| `CURSOR_PROXY_INSTANT_RESULT` | `true` | Send batch results instantly instead of simulated streaming |
-| `CURSOR_PROXY_FORWARD_THINKING` | `false` | Forward LLM reasoning as `reasoning_content` in SSE chunks |
-| `CURSOR_PROXY_STREAM_SPEED` | `200` | Chunked streaming speed (chars/sec, only when `INSTANT_RESULT=false`) |
-| `CURSOR_PROXY_REQUEST_TIMEOUT` | `300000` | Per-request timeout in ms (default 5 min) |
-| `CURSOR_PROXY_MAX_CONSECUTIVE_FAILURES` | `5` | Consecutive failure threshold; proxy self-exits for restart when exceeded |
-| `CURSOR_PROXY_API_KEY` | *(none)* | API key for standalone proxy auth |
+| Variable                                | Default  | Description                                                               |
+| --------------------------------------- | -------- | ------------------------------------------------------------------------- |
+| `OPENCLAW_TOOL_TIMEOUT_MS`              | `60000`  | Tool call timeout (ms)                                                    |
+| `OPENCLAW_TOOL_RETRY_COUNT`             | `2`      | Max retries on transient errors                                           |
+| `CURSOR_PROXY_INSTANT_RESULT`           | `true`   | Send batch results instantly instead of simulated streaming               |
+| `CURSOR_PROXY_FORWARD_THINKING`         | `false`  | Forward LLM reasoning as `reasoning_content` in SSE chunks                |
+| `CURSOR_PROXY_STREAM_SPEED`             | `200`    | Chunked streaming speed (chars/sec, only when `INSTANT_RESULT=false`)     |
+| `CURSOR_PROXY_REQUEST_TIMEOUT`          | `300000` | Per-request timeout in ms (default 5 min)                                 |
+| `CURSOR_PROXY_MAX_CONSECUTIVE_FAILURES` | `5`      | Consecutive failure threshold; proxy self-exits for restart when exceeded |
+| `CURSOR_PROXY_API_KEY`                  | _(none)_ | API key for standalone proxy auth                                         |
 
 </details>
 
 ## CLI Commands
 
-| Command | Description |
-|---|---|
-| `openclaw cursor-brain setup` | Configure MCP + interactive model selection |
-| `openclaw cursor-brain doctor` | Health check (10+ items) |
-| `openclaw cursor-brain status` | Show versions, config, models & tool count |
-| `openclaw cursor-brain upgrade <source>` | One-command upgrade + model selection |
-| `openclaw cursor-brain uninstall` | Full uninstall (configs + files) |
-| `openclaw cursor-brain proxy` | Show proxy status (PID, port, sessions) |
-| `openclaw cursor-brain proxy stop` | Stop the streaming proxy |
-| `openclaw cursor-brain proxy restart` | Restart proxy (detached) |
+| Command                                  | Description                                 |
+| ---------------------------------------- | ------------------------------------------- |
+| `openclaw cursor-brain setup`            | Configure MCP + interactive model selection |
+| `openclaw cursor-brain doctor`           | Health check (10+ items)                    |
+| `openclaw cursor-brain status`           | Show versions, config, models & tool count  |
+| `openclaw cursor-brain upgrade <source>` | One-command upgrade + model selection       |
+| `openclaw cursor-brain uninstall`        | Full uninstall (configs + files)            |
+| `openclaw cursor-brain proxy`            | Show proxy status (PID, port, sessions)     |
+| `openclaw cursor-brain proxy stop`       | Stop the streaming proxy                    |
+| `openclaw cursor-brain proxy restart`    | Restart proxy (detached)                    |
 | `openclaw cursor-brain proxy log [-n N]` | Show last N lines of proxy log (default 30) |
 
 ## Standalone Streaming Proxy
@@ -237,8 +244,8 @@ Endpoints: `POST /v1/chat/completions`, `GET /v1/models`, `GET /v1/health` (retu
         "baseUrl": "http://127.0.0.1:18790/v1",
         "apiKey": "local",
         "models": [
-          {"id": "auto", "name": "Auto"},
-          {"id": "opus-4.6", "name": "Claude 4.6 Opus"},
+          { "id": "auto", "name": "Auto" },
+          { "id": "opus-4.6", "name": "Claude 4.6 Opus" },
           "..."
         ]
       }
@@ -252,19 +259,19 @@ Endpoints: `POST /v1/chat/completions`, `GET /v1/models`, `GET /v1/health` (retu
 <details>
 <summary><strong>Troubleshooting</strong></summary>
 
-| Problem | Fix |
-|---|---|
-| "Cursor Agent CLI not found" | Install Cursor and launch once, or set `config.cursorPath` |
-| Gateway error | Confirm gateway running (`openclaw gateway status`), check token |
-| Tools not appearing | Restart gateway, call `openclaw_discover` in Cursor |
-| Tool timeout | Set `OPENCLAW_TOOL_TIMEOUT_MS=120000` |
-| Proxy not starting | `openclaw cursor-brain proxy log` to check; `proxy restart` to force start |
-| Proxy not updating after upgrade | Gateway auto-restarts proxy when `scriptHash` differs; verify with `curl http://127.0.0.1:18790/v1/health` |
-| Slow batch responses | `CURSOR_PROXY_INSTANT_RESULT` defaults to `true`; if set to `false`, batch results are chunked at ~200 chars/s |
-| Context lost between messages | Check `cursor-proxy.log` for `session=auto:dm:…(meta.auto)` — if showing `session=none(none)`, ensure Gateway embeds "Conversation info" metadata in user messages |
-| Context lost after restart | Sessions auto-persist to disk; use `proxy restart` (not `gateway restart`) to keep sessions |
-| Debug MCP server | `OPENCLAW_GATEWAY_URL=... node mcp-server/server.mjs` |
-| Debug tool calls | Check `~/.openclaw/cursor-proxy.log` for `tool:start` / `tool:done` entries |
+| Problem                          | Fix                                                                                                                                                                |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| "Cursor Agent CLI not found"     | Install Cursor and launch once, or set `config.cursorPath`                                                                                                         |
+| Gateway error                    | Confirm gateway running (`openclaw gateway status`), check token                                                                                                   |
+| Tools not appearing              | Restart gateway, call `openclaw_discover` in Cursor                                                                                                                |
+| Tool timeout                     | Set `OPENCLAW_TOOL_TIMEOUT_MS=120000`                                                                                                                              |
+| Proxy not starting               | `openclaw cursor-brain proxy log` to check; `proxy restart` to force start                                                                                         |
+| Proxy not updating after upgrade | Gateway auto-restarts proxy when `scriptHash` differs; verify with `curl http://127.0.0.1:18790/v1/health`                                                         |
+| Slow batch responses             | `CURSOR_PROXY_INSTANT_RESULT` defaults to `true`; if set to `false`, batch results are chunked at ~200 chars/s                                                     |
+| Context lost between messages    | Check `cursor-proxy.log` for `session=auto:dm:…(meta.auto)` — if showing `session=none(none)`, ensure Gateway embeds "Conversation info" metadata in user messages |
+| Context lost after restart       | Sessions auto-persist to disk; use `proxy restart` (not `gateway restart`) to keep sessions                                                                        |
+| Debug MCP server                 | `OPENCLAW_GATEWAY_URL=... node mcp-server/server.mjs`                                                                                                              |
+| Debug tool calls                 | Check `~/.openclaw/cursor-proxy.log` for `tool:start` / `tool:done` entries                                                                                        |
 
 </details>
 
