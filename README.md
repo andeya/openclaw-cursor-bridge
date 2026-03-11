@@ -25,7 +25,8 @@
 ## Prerequisites
 
 - [Cursor IDE](https://cursor.sh) installed and launched at least once
-- Cursor Agent CLI enabled: open Cursor → `Cmd+Shift+P` → type **Install 'cursor' command** → Enter (after this, `cursor-agent` or `agent` is available in the terminal)
+- Cursor Agent CLI enabled: open Cursor → `Cmd+Shift+P` → type **Install 'cursor' command** → Enter. Or execute shell `curl https://cursor.com/install -fsS | bash`. (after this, `cursor-agent` or `agent` is available in the terminal)
+
 - [OpenClaw](https://github.com/openclaw/openclaw) installed globally (`npm i -g openclaw`)
 - Node.js ≥ 18
 

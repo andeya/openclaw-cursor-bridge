@@ -25,7 +25,8 @@
 ## 前置条件
 
 - [Cursor IDE](https://cursor.sh) 已安装并至少启动过一次
-- Cursor Agent CLI 已启用：打开 Cursor → `Cmd+Shift+P` → 输入 **Install 'cursor' command** → 回车（安装后终端可用 `cursor-agent` 或 `agent` 命令）
+- Cursor Agent CLI 已启用：打开 Cursor → `Cmd+Shift+P` → 输入 **Install 'cursor' command** → 回车。或执行命令 `curl https://cursor.com/install -fsS | bash`。（安装后终端可用 `cursor-agent` 或 `agent` 命令）
+
 - [OpenClaw](https://github.com/openclaw/openclaw) 已全局安装（`npm i -g openclaw`）
 - Node.js ≥ 18
 
