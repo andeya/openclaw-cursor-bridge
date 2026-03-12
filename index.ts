@@ -1,8 +1,8 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
-import { existsSync, readFileSync, writeFileSync, appendFileSync, rmSync, realpathSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, appendFileSync, rmSync, realpathSync, mkdirSync, cpSync } from "fs";
 import { createHash } from "crypto";
-import { join, resolve } from "path";
+import { join, resolve, dirname, isAbsolute } from "path";
 import { homedir } from "os";
 import { execSync, spawn } from "child_process";
 import { createRequire } from "module";
@@ -72,6 +72,15 @@ function computeFileHash(filePath: string): string {
     const content = readFileSync(filePath, "utf-8");
     return createHash("sha256").update(content).digest("hex").slice(0, 12);
   } catch { return "unknown"; }
+}
+
+/** Run interactive setup (model selection) during plugins install when TTY is available. */
+function runInteractiveSetupAfterInstall(): void {
+  try {
+    execSync("openclaw cursor-brain setup", { stdio: "inherit" });
+  } catch {
+    // User cancelled or non-zero exit; ignore so install still completes
+  }
 }
 
 function readPackageVersion(dir: string): string {
@@ -308,6 +317,48 @@ function saveModelSelection(primary: string, fallbacks: string[], proxyPort: num
   writeFileSync(OPENCLAW_CONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
 }
 
+const VALID_SOURCES = ["npm", "archive", "path"] as const;
+
+/**
+ * Re-read openclaw.json and fix plugins.installs[PLUGIN_ID].source to a valid
+ * value (or re-add the record if missing after core overwrite). Called from
+ * setImmediate after install so we run after core may have written invalid source.
+ */
+function fixInstallRecordSourceOnDisk(installPath: string): void {
+  try {
+    if (!existsSync(OPENCLAW_CONFIG_PATH)) return;
+    const raw = readFileSync(OPENCLAW_CONFIG_PATH, "utf-8");
+    const cfg = JSON.parse(raw);
+    const plugins = cfg.plugins || {};
+    const installs = plugins.installs || {};
+    const entries = plugins.entries || {};
+    let rec = installs[PLUGIN_ID];
+    let changed = false;
+    if (!rec) {
+      rec = { installPath, source: "path", sourcePath: resolve(installPath) };
+      if (existsSync(join(installPath, "package.json"))) {
+        try { rec.version = JSON.parse(readFileSync(join(installPath, "package.json"), "utf-8")).version; } catch { /* ignore */ }
+      }
+      installs[PLUGIN_ID] = rec;
+      plugins.installs = installs;
+      entries[PLUGIN_ID] = { ...entries[PLUGIN_ID], enabled: true };
+      plugins.entries = entries;
+      const allow: string[] = Array.isArray(plugins.allow) ? plugins.allow : [];
+      if (!allow.includes(PLUGIN_ID)) {
+        allow.push(PLUGIN_ID);
+        plugins.allow = allow;
+      }
+      cfg.plugins = plugins;
+      changed = true;
+    } else if (rec.source === "tarball" || (rec.source && !VALID_SOURCES.includes(rec.source as any))) {
+      rec.source = existsSync(join(installPath, "package.json")) ? "path" : "archive";
+      if (rec.source === "path") rec.sourcePath = resolve(installPath);
+      changed = true;
+    }
+    if (changed) writeFileSync(OPENCLAW_CONFIG_PATH, JSON.stringify(cfg, null, 2) + "\n");
+  } catch { /* ignore */ }
+}
+
 /**
  * Ensure plugins.installs and plugins.entries in openclaw.json reflect the
  * actual on-disk state.  Both `openclaw plugins install` and `uninstall` may
@@ -338,13 +389,16 @@ function syncPluginInstallRecord(opts: {
   const prev = installs[PLUGIN_ID] || {};
   const record: Record<string, any> = { ...prev, installPath: opts.installPath };
 
+  // OpenClaw only allows source: "npm" | "archive" | "path"
+  if (record.source === "tarball") record.source = "archive";
+
   if (version !== "unknown") record.version = version;
   if (opts.updateTimestamp !== false) record.installedAt = new Date().toISOString();
 
   if (opts.source) {
     const abs = resolve(opts.source);
     if (opts.source.endsWith(".tgz") || opts.source.endsWith(".tar.gz")) {
-      record.source = "tarball";
+      record.source = "archive";
       record.sourcePath = abs;
       delete record.spec;
     } else if (existsSync(join(abs, "package.json"))) {
@@ -354,6 +408,17 @@ function syncPluginInstallRecord(opts: {
     } else {
       record.source = "npm";
       record.spec = opts.source;
+      delete record.sourcePath;
+    }
+  } else if (!record.source || record.source === "tarball") {
+    // Always set a valid source so core validation never sees invalid/tarball
+    if (existsSync(join(opts.installPath, "package.json"))) {
+      record.source = "path";
+      record.sourcePath = resolve(opts.installPath);
+      delete record.spec;
+    } else {
+      record.source = "npm";
+      record.spec = PLUGIN_ID;
       delete record.sourcePath;
     }
   }
@@ -422,15 +487,35 @@ const plugin = {
   configSchema: emptyPluginConfigSchema(),
 
   register(api: OpenClawPluginApi) {
+    // Fix invalid source value on disk immediately so OpenClaw config validation won't overwrite
+    try {
+      if (existsSync(OPENCLAW_CONFIG_PATH)) {
+        const raw = readFileSync(OPENCLAW_CONFIG_PATH, "utf-8");
+        const cfg = JSON.parse(raw);
+        const rec = cfg?.plugins?.installs?.[PLUGIN_ID];
+        if (rec && rec.source && !VALID_SOURCES.includes(rec.source as any)) {
+          rec.source = rec.source === "tarball" ? "archive" : "path";
+          if (rec.source === "path" && rec.installPath) rec.sourcePath = resolve(rec.installPath);
+          writeFileSync(OPENCLAW_CONFIG_PATH, JSON.stringify(cfg, null, 2) + "\n");
+        }
+      }
+    } catch { /* ignore */ }
+
     const pluginDir = resolvePluginDir(api);
     const config = api.config;
     const pluginConfig = api.pluginConfig || {};
 
-    const isUninstalling = process.argv.some(
-      (a) => a === "uninstall" || a === "upgrade"
-    );
+    // Only skip setup when user runs our CLI uninstall/upgrade; "openclaw plugins upgrade" should still run register setup
+    const isCursorBrainUninstallOrUpgrade =
+      process.argv.includes("cursor-brain") &&
+      process.argv.some((a) => a === "uninstall" || a === "upgrade");
+    const isUninstalling = isCursorBrainUninstallOrUpgrade;
     const argv = process.argv.join(" ");
     const isProxyCmd = /\bcursor-brain\s+proxy\b/.test(argv);
+    // During "openclaw plugins install", do not start proxy or timers so the install process can exit
+    const isPluginsInstall = process.argv.includes("plugins") && process.argv.includes("install");
+    // When running "cursor-brain setup" (standalone or as install child), skip starting proxy; user will "gateway restart" to get proxy
+    const isSetupOnly = process.argv.includes("cursor-brain") && process.argv.includes("setup");
 
     if (!isUninstalling) {
       const ctx: SetupContext = {
@@ -449,6 +534,10 @@ const plugin = {
 
       if (result.cursorPath && result.mcpConfigured) {
         api.logger.info("Cursor Brain setup complete");
+      }
+      const runInteractiveSetup = isPluginsInstall && result.cursorPath && result.cursorModels.length > 0 && !!process.stdin.isTTY;
+      if (isPluginsInstall && result.cursorPath && !runInteractiveSetup) {
+        api.logger.info("Run 'openclaw cursor-brain setup' to choose primary/fallback models (optional), then 'openclaw gateway restart' to start.");
       }
 
       const proxyPort = (pluginConfig.proxyPort as number) || DEFAULT_PROXY_PORT;
@@ -474,6 +563,26 @@ const plugin = {
           if (providerUnchanged && providerExists) {
             api.logger.info(`Provider "${PROVIDER_ID}" unchanged (${discovered.length} models, port ${proxyPort})`);
             doSyncInstallRecord();
+            // Still ensure default model is set when missing (e.g. config was overwritten or never set)
+            try {
+              let cfg: Record<string, any> = {};
+              try { cfg = JSON.parse(readFileSync(OPENCLAW_CONFIG_PATH, "utf-8")); } catch { /* ignore */ }
+              const currentPrimary = (cfg.agents?.defaults?.model as any)?.primary;
+              if (!currentPrimary || String(currentPrimary).startsWith(`${PROVIDER_ID}/`)) {
+                const primary = (pluginConfig.model as string) || "auto";
+                const fallbacks = discovered.filter((m) => m.id !== primary).map((m) => `${PROVIDER_ID}/${m.id}`);
+                const agents = cfg.agents || {};
+                const defaults = agents.defaults || {};
+                defaults.model = { primary: `${PROVIDER_ID}/${primary}`, fallbacks };
+                agents.defaults = defaults;
+                cfg.agents = agents;
+                writeFileSync(OPENCLAW_CONFIG_PATH, JSON.stringify(cfg, null, 2) + "\n");
+                api.logger.info(`Default model set to ${PROVIDER_ID}/${primary}`);
+              }
+            } catch (e: any) {
+              api.logger.warn(`Could not set default model: ${e.message}`);
+            }
+            if (runInteractiveSetup) runInteractiveSetupAfterInstall();
           } else {
             // Read fresh config from disk rather than using api.config snapshot,
             // which may contain stale plugins data (e.g. during install subprocess
@@ -494,9 +603,13 @@ const plugin = {
               },
             };
 
-            if (!providerExists) {
-              const defaultModel = discovered.find((m) => m.isDefault);
-              const primary = (pluginConfig.model as string) || defaultModel?.id || discovered[0]?.id || "auto";
+            const currentPrimary = (freshConfig.agents?.defaults?.model as any)?.primary;
+            const shouldSetDefaultModel =
+              !providerExists ||
+              !currentPrimary ||
+              String(currentPrimary).startsWith(`${PROVIDER_ID}/`);
+            if (shouldSetDefaultModel) {
+              const primary = (pluginConfig.model as string) || "auto";
               const fallbacks = discovered.filter((m) => m.id !== primary).map((m) => `${PROVIDER_ID}/${m.id}`);
               (patch as any).agents = {
                 ...(freshConfig.agents || {}),
@@ -510,23 +623,46 @@ const plugin = {
               };
             }
 
-            api.runtime.config.writeConfigFile(patch as any).then(() => {
-              api.logger.info(`Provider "${PROVIDER_ID}" synced (${discovered.length} models, port ${proxyPort})`);
-              doSyncInstallRecord();
-            }).catch((err: any) => {
-              api.logger.warn(`Could not write config: ${err.message}`);
-              doSyncInstallRecord();
-            });
+            // Ensure OpenClaw-accepted source value (avoids config overwrite during install)
+            const patchInstallRecord = (patch as any).plugins?.installs?.[PLUGIN_ID];
+            if (patchInstallRecord?.source === "tarball") patchInstallRecord.source = "archive";
+
+            if (isPluginsInstall) {
+              try {
+                mkdirSync(dirname(OPENCLAW_CONFIG_PATH), { recursive: true });
+                writeFileSync(OPENCLAW_CONFIG_PATH, JSON.stringify(patch, null, 2) + "\n");
+                api.logger.info(`Provider "${PROVIDER_ID}" synced (${discovered.length} models, port ${proxyPort})`);
+                doSyncInstallRecord();
+                if (runInteractiveSetup) runInteractiveSetupAfterInstall();
+                // Core may overwrite config after we return; fix source again on next tick so disk stays valid
+                setImmediate(() => fixInstallRecordSourceOnDisk(pluginDir));
+              } catch (err: any) {
+                api.logger.warn(`Could not write config: ${err.message}`);
+                doSyncInstallRecord();
+                if (runInteractiveSetup) runInteractiveSetupAfterInstall();
+                setImmediate(() => fixInstallRecordSourceOnDisk(pluginDir));
+              }
+            } else {
+              api.runtime.config.writeConfigFile(patch as any).then(() => {
+                api.logger.info(`Provider "${PROVIDER_ID}" synced (${discovered.length} models, port ${proxyPort})`);
+                doSyncInstallRecord();
+              }).catch((err: any) => {
+                api.logger.warn(`Could not write config: ${err.message}`);
+                doSyncInstallRecord();
+              });
+            }
           }
         } catch (e: any) {
           api.logger.warn(`Could not auto-configure: ${e.message}`);
           doSyncInstallRecord();
+          if (isPluginsInstall) setImmediate(() => fixInstallRecordSourceOnDisk(pluginDir));
         }
       } else {
         doSyncInstallRecord();
+        if (isPluginsInstall) setImmediate(() => fixInstallRecordSourceOnDisk(pluginDir));
       }
 
-      if (result.cursorPath && !isProxyCmd) {
+      if (result.cursorPath && !isProxyCmd && !isPluginsInstall && !isSetupOnly) {
         const proxyOpts = {
           pluginDir,
           cursorPath: result.cursorPath,
@@ -621,6 +757,7 @@ const plugin = {
             syncPluginInstallRecord({ installPath: pluginDir, updateTimestamp: false });
           } catch {}
           clack.outro("Run `openclaw gateway restart` to apply changes");
+          process.exit(0);
         });
 
       prog
@@ -782,34 +919,86 @@ const plugin = {
               timeout: 30000,
               stdio: ["pipe", "pipe", "pipe"],
             });
-          } catch { /* ignore */ }
+          } catch (e: any) {
+            const msg = e?.stderr || e?.stdout || e?.message || String(e);
+            if (msg) clack.log.warn(`Uninstall CLI output: ${msg.slice(0, 500)}`);
+          }
           if (existsSync(installPath)) {
             rmSync(installPath, { recursive: true, force: true });
           }
+          try { removePluginInstallRecord(); } catch {}
           runCleanup();
+          if (existsSync(installPath)) {
+            clack.log.warn(`Install path still exists after cleanup: ${installPath}`);
+            rmSync(installPath, { recursive: true, force: true });
+          }
           s.stop(`Old plugin removed (v${oldVersion})`);
 
+          // Resolve source path. Only use PWD for path-like source (e.g. "./"): during upgrade the host may have
+          // chdir'd to the plugin dir, so process.cwd() would be wrong. For npm specs (e.g. "openclaw-cursor-brain")
+          // we must not resolve with PWD, else resolve(PWD, "openclaw-cursor-brain") can equal installPath and trigger a false conflict.
+          const isPathLike = source.startsWith(".") || isAbsolute(source);
+          const baseDir = isPathLike ? (process.env.PWD || process.cwd()) : process.cwd();
+          let resolvedPath = isAbsolute(source) ? source : resolve(baseDir, source);
+          if (isPathLike && !isAbsolute(source) && resolvedPath === installPath) {
+            resolvedPath = resolve(process.cwd(), source);
+            if (resolvedPath === installPath) {
+              clack.log.error("Cannot resolve source: current directory appears to be the plugin dir. Use an absolute path: openclaw cursor-brain upgrade /path/to/openclaw-cursor-brain");
+              process.exitCode = 1;
+              return;
+            }
+            clack.log.warn(`Using PWD (${baseDir}) to resolve "${source}"; process.cwd() was the plugin dir.`);
+          }
+          const isLocalPath =
+            isAbsolute(source) ||
+            source.startsWith(".") ||
+            existsSync(resolvedPath) ||
+            existsSync(join(resolvedPath, "package.json"));
+          const installSource = isLocalPath ? resolvedPath : source;
+          const installArg = isLocalPath ? `"${installSource.replace(/"/g, '\\"')}"` : installSource;
+
           s.start(`Installing from ${source}...`);
+          let installError: string | undefined;
           try {
-            execSync(`openclaw plugins install ${source}`, {
+            const installCwd = isLocalPath ? resolvedPath : process.cwd();
+            const installCmd = isLocalPath ? "openclaw plugins install ." : `openclaw plugins install ${installArg}`;
+            execSync(installCmd, {
               encoding: "utf-8",
               timeout: 60000,
               stdio: ["pipe", "pipe", "pipe"],
+              cwd: installCwd,
             });
-          } catch {
-            // openclaw may exit non-zero due to plugins.allow warnings; check actual result below
+          } catch (e: any) {
+            installError = [e?.stderr, e?.stdout, e?.message].filter(Boolean).join("\n").trim().slice(0, 800);
           }
-          const pluginEntry = join(installPath, "index.ts");
+          let pluginEntry = join(installPath, "index.ts");
+          if (!existsSync(pluginEntry) && isLocalPath) {
+            s.start("Copying from source...");
+            mkdirSync(installPath, { recursive: true });
+            try {
+              cpSync(resolvedPath, installPath, {
+                recursive: true,
+                filter: (src) => !/[/\\]node_modules([/\\]|$)|[/\\]\.git([/\\]|$)/.test(src),
+              });
+            } catch (copyErr: any) {
+              clack.log.error(`Fallback copy failed: ${copyErr?.message || copyErr}`);
+            }
+            pluginEntry = join(installPath, "index.ts");
+          }
           if (!existsSync(pluginEntry)) {
             s.stop("Install failed");
-            clack.log.error("Plugin files not found after install");
+            clack.log.error("Plugin files not found after install. Try: openclaw plugins install ./");
+            clack.log.error(`  installPath: ${installPath}`);
+            clack.log.error(`  source (resolved): ${resolvedPath}`);
+            clack.log.error(`  isLocalPath: ${isLocalPath}`);
+            if (installError) clack.log.error(`  install command stderr/stdout:\n${installError}`);
             process.exitCode = 1;
             return;
           }
           s.stop(`New version installed (v${readPackageVersion(installPath)})`);
 
           try {
-            syncPluginInstallRecord({ installPath, source, updateTimestamp: true });
+            syncPluginInstallRecord({ installPath, source: installSource, updateTimestamp: true });
           } catch (e: any) {
             clack.log.warn(`Could not sync install record: ${e.message}`);
           }
@@ -843,6 +1032,7 @@ const plugin = {
           }
 
           clack.outro("Run `openclaw gateway restart` to apply changes");
+          process.exit(0);
         });
 
       // ── proxy subcommand group ──────────────────────────────────────────
@@ -950,17 +1140,23 @@ const plugin = {
             console.log("No proxy log file found.");
             return;
           }
-          const n = parseInt(opts.lines, 10) || 30;
+          const n = Math.max(1, parseInt(opts.lines, 10) || 30);
           try {
-            const out = execSync(`tail -n ${n} "${logPath}"`, { encoding: "utf-8", timeout: 5000, stdio: ["pipe", "pipe", "pipe"] });
-            console.log(out.trimEnd());
-          } catch {
+            if (process.platform !== "win32") {
+              const out = execSync(`tail -n ${n} "${logPath}"`, { encoding: "utf-8", timeout: 5000, stdio: ["pipe", "pipe", "pipe"] });
+              console.log(out.trimEnd());
+            } else {
+              const content = readFileSync(logPath, "utf-8");
+              const lines = content.trimEnd().split("\n");
+              console.log(lines.slice(-n).join("\n"));
+            }
+          } catch (e: any) {
             try {
               const content = readFileSync(logPath, "utf-8");
               const lines = content.trimEnd().split("\n");
               console.log(lines.slice(-n).join("\n"));
-            } catch (e: any) {
-              console.error(`Could not read log: ${e.message}`);
+            } catch (err: any) {
+              console.error(`Could not read log: ${err?.message || e?.message}`);
             }
           }
         });

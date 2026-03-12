@@ -1,6 +1,6 @@
 {
   "name": "openclaw-cursor-brain",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "description": "Use Cursor as the AI brain for OpenClaw — connects all plugin tools via MCP with zero manual config.",
   "type": "module",
   "license": "MIT",
@@ -26,9 +26,13 @@
   "engines": {
     "node": ">=18.0.0"
   },
+  "scripts": {
+    "clean-config": "node scripts/clean-openclaw-config.mjs"
+  },
   "files": [
     "index.ts",
     "src/",
+    "scripts/",
     "mcp-server/",
     "skills/",
     "openclaw.plugin.json",

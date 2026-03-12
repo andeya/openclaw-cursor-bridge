@@ -33,9 +33,16 @@
 ## 快速开始
 
 ```bash
-openclaw plugins install openclaw-cursor-brain # 安装与配置
-openclaw gateway restart # 重启服务
-openclaw cursor-brain doctor    # 验证
+openclaw plugins install openclaw-cursor-brain # 安装与默认配置
+openclaw gateway restart                       # 重启服务
+openclaw cursor-brain doctor                   # 验证
+```
+
+**主/备模型选择**（可选）：在终端为 TTY 时，**`openclaw plugins install`** 完成后会自动进入交互式选择；若非 TTY 或未弹出，可手动执行：
+
+```bash
+openclaw cursor-brain setup   # 可选：选择主模型与备用模型
+openclaw gateway restart      # 若改了配置需重启
 ```
 
 **setup** 和 **upgrade** 时自动从 `cursor-agent --list-models` 发现可用模型。主模型单选，备用模型多选（空格切换），默认按 cursor 原始顺序全选：
@@ -219,7 +226,8 @@ curl http://127.0.0.1:18790/v1/chat/completions \
       "args": ["<插件路径>/mcp-server/server.mjs"],
       "env": {
         "OPENCLAW_GATEWAY_URL": "http://127.0.0.1:<port>",
-        "OPENCLAW_GATEWAY_TOKEN": "<token>"
+        "OPENCLAW_GATEWAY_TOKEN": "<token>",
+        "OPENCLAW_CONFIG_PATH": "~/.openclaw/openclaw.json"
       }
     }
   }
@@ -260,19 +268,25 @@ curl http://127.0.0.1:18790/v1/chat/completions \
 <details>
 <summary><strong>故障排查</strong></summary>
 
-| 问题                         | 解决                                                                                                 |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------- |
-| "Cursor Agent CLI not found" | 安装 Cursor 并运行一次，或设置 `config.cursorPath`                                                   |
-| Gateway 错误                 | 确认 Gateway 运行中（`openclaw gateway status`），检查 token                                         |
-| 工具未出现                   | 重启 Gateway，在 Cursor 中调用 `openclaw_discover`                                                   |
-| 工具超时                     | 设置 `OPENCLAW_TOOL_TIMEOUT_MS=120000`                                                               |
-| Proxy 未启动                 | `openclaw cursor-brain proxy log` 查看日志；`proxy restart` 强制启动                                 |
-| 升级后 Proxy 未更新          | Gateway 自动检测 `scriptHash` 变化并重启；用 `curl http://127.0.0.1:18790/v1/health` 验证            |
-| 消息间上下文丢失             | 查看 `cursor-proxy.log` 中 `session=auto:dm:…(meta.auto)` — 若为 `none(none)` 说明消息中未嵌入元数据 |
-| 重启后上下文丢失             | 会话已自动持久化；用 `proxy restart`（而非 `gateway restart`）可保留会话                             |
-| 批量响应延迟                 | `CURSOR_PROXY_INSTANT_RESULT` 默认 `true`；若设为 `false` 则按 ~200 字符/秒分块                      |
-| 调试工具调用                 | 查看 `~/.openclaw/cursor-proxy.log` 中 `tool:start` / `tool:done` 条目                               |
-| 调试 MCP                     | `OPENCLAW_GATEWAY_URL=... node mcp-server/server.mjs`                                                |
+| 问题                                                         | 解决                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **卡在「Provider synced」后不退出**                          | 旧版在 `plugins install` 时会启动 proxy/定时器导致进程不退出；新版已修复，安装会正常结束。请升级到最新版。                                                                                                                                                                                                                                                                                |
+| **安装时没有主/备模型选择**                                  | 需在 TTY 终端下安装才会自动弹出；否则安装后执行 `openclaw cursor-brain setup` 即可。                                                                                                                                                                                                                                                                                                      |
+| **Invalid config … source / unknown command 'cursor-brain'** | 旧版曾写入非法 `source: "tarball"`。新版会在 register 时自动修正。若仍报错，请打开 `~/.openclaw/openclaw.json`，把 `plugins.installs.openclaw-cursor-brain.source` 改为 `"archive"`（或 `"path"` 若为本地安装），保存后再执行一次 `openclaw plugins install ./`。                                                                                                                         |
+| **plugins.allow / plugins.entries: plugin not found**        | 配置里残留了已卸载插件的引用，且 `openclaw doctor --fix` 可能不会清除。在项目目录执行 **`npm run clean-config`**（或 `node scripts/clean-openclaw-config.mjs`）清理后，再执行 `openclaw plugins install ./`。或手动编辑 `~/.openclaw/openclaw.json`，从 `plugins.allow` 中删掉 `openclaw-cursor-brain`，并删掉 `plugins.entries.openclaw-cursor-brain`。                                  |
+| **No API key found for provider "anthropic"**                | 当前默认模型不是 cursor-local，而是 anthropic（需 API key）。改用本机 Cursor：执行 `openclaw config set agents.defaults.model.primary "cursor-local/auto"`，或运行 `openclaw cursor-brain setup` 选择主模型为 cursor-local/auto，然后 `openclaw gateway restart`。若某 agent 单独指定了 anthropic，用 `openclaw config get agents.list` 查看并改其 `model.primary` 或删/改该 agent 配置。 |
+| "Cursor Agent CLI not found"                                 | 安装 Cursor 并运行一次，或设置 `config.cursorPath`                                                                                                                                                                                                                                                                                                                                        |
+| Gateway 错误                                                 | 确认 Gateway 运行中（`openclaw gateway status`），检查 token                                                                                                                                                                                                                                                                                                                              |
+| 工具未出现                                                   | 重启 Gateway，在 Cursor 中调用 `openclaw_discover`                                                                                                                                                                                                                                                                                                                                        |
+| 工具超时                                                     | 设置 `OPENCLAW_TOOL_TIMEOUT_MS=120000`                                                                                                                                                                                                                                                                                                                                                    |
+| Proxy 未启动                                                 | `openclaw cursor-brain proxy log` 查看日志；`proxy restart` 强制启动                                                                                                                                                                                                                                                                                                                      |
+| **Cursor 限速 / 504 超时 / proxy 频繁退出**                  | 限速时单次请求变慢，易触发 proxy 的「连续超时则退出重启」。新版已放宽默认：降级超时 3 分钟、连续 5 次超时或 8 次失败才退出。若仍 504，可设环境变量再放宽：`CURSOR_PROXY_DEGRADED_TIMEOUT=300000`（5 分钟）、`CURSOR_PROXY_MAX_CONSECUTIVE_TIMEOUTS=10`，然后 `openclaw gateway restart`。飞书等渠道有约 50–60 秒回复超时，若 Cursor 经常超过则需减少并发或等限速恢复。                    |
+| 升级后 Proxy 未更新                                          | Gateway 自动检测 `scriptHash` 变化并重启；用 `curl http://127.0.0.1:18790/v1/health` 验证                                                                                                                                                                                                                                                                                                 |
+| 消息间上下文丢失                                             | 查看 `cursor-proxy.log` 中 `session=auto:dm:…(meta.auto)` — 若为 `none(none)` 说明消息中未嵌入元数据                                                                                                                                                                                                                                                                                      |
+| 重启后上下文丢失                                             | 会话已自动持久化；用 `proxy restart`（而非 `gateway restart`）可保留会话                                                                                                                                                                                                                                                                                                                  |
+| 批量响应延迟                                                 | `CURSOR_PROXY_INSTANT_RESULT` 默认 `true`；若设为 `false` 则按 ~200 字符/秒分块                                                                                                                                                                                                                                                                                                           |
+| 调试工具调用                                                 | 查看 `~/.openclaw/cursor-proxy.log` 中 `tool:start` / `tool:done` 条目                                                                                                                                                                                                                                                                                                                    |
+| 调试 MCP                                                     | `OPENCLAW_GATEWAY_URL=... node mcp-server/server.mjs`                                                                                                                                                                                                                                                                                                                                     |
 
 </details>
 

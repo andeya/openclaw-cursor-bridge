@@ -188,14 +188,7 @@ function createGatewayCheck(port: number, token: string): CheckResult {
     const isWin = process.platform === "win32";
 
     if (isWin) {
-      const script = `
-        const r = await fetch("http://127.0.0.1:${port}/tools/invoke", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "Authorization": "Bearer ${token}" },
-          body: '{"tool":"__ping__","args":{}}'
-        });
-        process.stdout.write(String(r.status));
-      `;
+      const script = `(async()=>{const r=await fetch("http://127.0.0.1:${port}/tools/invoke",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer ${token}"},body:'{"tool":"__ping__","args":{}}'});process.stdout.write(String(r.status));})();`;
       const status = execSync(`node -e "${script.replace(/"/g, '\\"')}"`, {
         encoding: "utf-8",
         timeout: 5000,

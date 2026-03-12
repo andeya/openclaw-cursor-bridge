@@ -37,9 +37,9 @@ const INSTANT_RESULT = process.env.CURSOR_PROXY_INSTANT_RESULT !== "false";
 const TARGET_CHARS_PER_SEC = parseInt(process.env.CURSOR_PROXY_STREAM_SPEED || "200", 10);
 const SHORT_TEXT_THRESHOLD = 100;
 const REQUEST_TIMEOUT_MS = parseInt(process.env.CURSOR_PROXY_REQUEST_TIMEOUT || "300000", 10); // 5 min default
-const DEGRADED_TIMEOUT_MS = parseInt(process.env.CURSOR_PROXY_DEGRADED_TIMEOUT || "60000", 10); // 60s when degraded
-const MAX_CONSECUTIVE_FAILURES = parseInt(process.env.CURSOR_PROXY_MAX_CONSECUTIVE_FAILURES || "5", 10);
-const MAX_CONSECUTIVE_TIMEOUTS = parseInt(process.env.CURSOR_PROXY_MAX_CONSECUTIVE_TIMEOUTS || "2", 10);
+const DEGRADED_TIMEOUT_MS = parseInt(process.env.CURSOR_PROXY_DEGRADED_TIMEOUT || "180000", 10); // 3 min when degraded (tolerate rate limit)
+const MAX_CONSECUTIVE_FAILURES = parseInt(process.env.CURSOR_PROXY_MAX_CONSECUTIVE_FAILURES || "8", 10);
+const MAX_CONSECUTIVE_TIMEOUTS = parseInt(process.env.CURSOR_PROXY_MAX_CONSECUTIVE_TIMEOUTS || "5", 10);
 
 // ── Request health tracking ─────────────────────────────────────────────────
 
@@ -206,6 +206,14 @@ function log(level, msg) {
   try { process.stderr.write(`[cursor-proxy] ${line}`); } catch {}
 }
 
+/** Pass through cursor-agent stderr as the user-facing message when there is no response. */
+function formatNoResponseMessage(stderrSnippet) {
+  const trimmed = stderrSnippet?.trim();
+  if (!trimmed) return "(no response from cursor-agent)";
+  const firstLine = trimmed.split(/\r?\n/)[0].trim().slice(0, 500);
+  return firstLine || "(no response from cursor-agent)";
+}
+
 function extractUserMessage(messages) {
   if (!Array.isArray(messages) || !messages.length) return "";
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -319,7 +327,20 @@ function extractSessionFromMeta(messages) {
 
 // ── Stream output processor (reusable for retry) ────────────────────────────
 
-function processStreamOutput(child, { requestId, model, sessionKey, res }) {
+const STREAM_HEADERS = {
+  "Content-Type": "text/event-stream",
+  "Cache-Control": "no-cache",
+  Connection: "keep-alive",
+  "X-Accel-Buffering": "no",
+};
+
+function ensureStreamHeaders(res, streamState) {
+  if (streamState.headersSent) return;
+  res.writeHead(200, STREAM_HEADERS);
+  streamState.headersSent = true;
+}
+
+function processStreamOutput(child, { requestId, model, sessionKey, res, streamState }) {
   return new Promise((resolve) => {
     let resolved = false;
     let resultText = "";
@@ -370,6 +391,7 @@ function processStreamOutput(child, { requestId, model, sessionKey, res }) {
       if (type === "thinking") {
         if (FORWARD_THINKING && parsed.text) {
           hasStreamedContent = true;
+          if (streamState) ensureStreamHeaders(res, streamState);
           const delta = { reasoning_content: parsed.text };
           const chunk = {
             id: requestId, object: "chat.completion.chunk",
@@ -383,6 +405,7 @@ function processStreamOutput(child, { requestId, model, sessionKey, res }) {
 
       if (type === "text" && parsed.text) {
         hasStreamedContent = true;
+        if (streamState) ensureStreamHeaders(res, streamState);
         res.write(sseEvent(requestId, model, { content: parsed.text }));
         return;
       }
@@ -435,12 +458,7 @@ async function handleStream(req, res, body) {
     child.kill();
   }, effectiveTimeout);
 
-  res.writeHead(200, {
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache",
-    Connection: "keep-alive",
-    "X-Accel-Buffering": "no",
-  });
+  const streamState = { headersSent: false };
 
   req.on("close", () => {
     clientGone = true;
@@ -449,7 +467,7 @@ async function handleStream(req, res, body) {
     log("info", `[${requestId}] client disconnected after ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
   });
 
-  let result = await processStreamOutput(child, { requestId, model, sessionKey, res });
+  let result = await processStreamOutput(child, { requestId, model, sessionKey, res, streamState });
 
   if (clientGone) {
     log("info", `[${requestId}] agent finished after client disconnect, ${((Date.now() - startTime) / 1000).toFixed(1)}s, resultLen=${result.resultText.length}`);
@@ -477,7 +495,7 @@ async function handleStream(req, res, body) {
       log("warn", `[${requestId}] retry timeout after ${effectiveTimeout}ms, killing cursor-agent`);
       child.kill();
     }, effectiveTimeout);
-    result = await processStreamOutput(child, { requestId, model, sessionKey, res });
+    result = await processStreamOutput(child, { requestId, model, sessionKey, res, streamState });
     clearTimeout(retryTimeout);
     if (clientGone) return;
     if (result.error) {
@@ -494,18 +512,27 @@ async function handleStream(req, res, body) {
   let needsExit = false;
 
   if (!hasContent) {
-    if (timedOut) {
-      needsExit = recordTimeout();
-      res.write(sseEvent(requestId, model, { content: "[Error] cursor-agent request timed out. The AI backend may be temporarily unavailable — the system will auto-restart shortly. Please try again in a moment." }));
-    } else {
-      needsExit = recordFailure(child._stderrBuf?.trim().slice(0, 200));
-      res.write(sseEvent(requestId, model, { content: "(no response from cursor-agent)" }));
+    const stderrSnippet = child._stderrBuf?.trim().slice(0, 200);
+    needsExit = timedOut ? recordTimeout() : recordFailure(stderrSnippet);
+    const msg = timedOut
+      ? "cursor-agent request timed out. The AI backend may be temporarily unavailable — the system will auto-restart shortly. Please try again in a moment."
+      : formatNoResponseMessage(stderrSnippet);
+    if (!streamState.headersSent) {
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: msg, code: "no_response" } }));
+      if (canRetry) log("warn", `[${requestId}] retry also returned empty`);
+      log("info", `[${requestId}] completed in ${(elapsed / 1000).toFixed(1)}s, 503 (no content, client may retry with fallback model)`);
+      exitIfNeeded(needsExit);
+      return;
     }
+    if (timedOut) needsExit = recordTimeout();
+    res.write(sseEvent(requestId, model, { content: `[Error] ${msg}` }));
     if (canRetry) log("warn", `[${requestId}] retry also returned empty`);
   } else {
     recordSuccess();
     if (canRetry) log("info", `[${requestId}] retry succeeded`);
     if (result.resultText && !result.hasStreamedContent) {
+      ensureStreamHeaders(res, streamState);
       if (INSTANT_RESULT) {
         res.write(sseEvent(requestId, model, { content: result.resultText }));
       } else {
@@ -644,30 +671,39 @@ async function handleNonStream(req, res, body) {
     if (retried) log("warn", `[${requestId}] retry also returned empty`);
   }
 
-  const content = result.resultText || (timedOut
-    ? "[Error] cursor-agent request timed out. The AI backend may be temporarily unavailable — the system will auto-restart shortly. Please try again in a moment."
-    : "(no response)");
-
-  res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(
-    JSON.stringify({
-      id: requestId,
-      object: "chat.completion",
-      created: Math.floor(Date.now() / 1000),
-      model,
-      choices: [{
-        index: 0,
-        message: {
-          role: "assistant",
-          content,
-          ...(result.thinkingText ? { reasoning_content: result.thinkingText } : {}),
-        },
-        finish_reason: "stop",
-      }],
-      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
-    }),
-  );
-  log("info", `[${requestId}] completed in ${((Date.now() - startTime) / 1000).toFixed(1)}s, resultLen=${content.length}`);
+  if (result.resultText) {
+    recordSuccess();
+    if (retried) log("info", `[${requestId}] retry succeeded`);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        id: requestId,
+        object: "chat.completion",
+        created: Math.floor(Date.now() / 1000),
+        model,
+        choices: [{
+          index: 0,
+          message: {
+            role: "assistant",
+            content: result.resultText,
+            ...(result.thinkingText ? { reasoning_content: result.thinkingText } : {}),
+          },
+          finish_reason: "stop",
+        }],
+        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      }),
+    );
+    log("info", `[${requestId}] completed in ${((Date.now() - startTime) / 1000).toFixed(1)}s, resultLen=${result.resultText.length}`);
+  } else {
+    const stderrSnippet = child._stderrBuf?.trim().slice(0, 200);
+    needsExit = timedOut ? recordTimeout() : recordFailure(stderrSnippet);
+    const errMsg = timedOut
+      ? "cursor-agent request timed out. The AI backend may be temporarily unavailable — the system will auto-restart shortly. Please try again in a moment."
+      : formatNoResponseMessage(stderrSnippet);
+    res.writeHead(503, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: { message: errMsg, code: "no_response" } }));
+    log("info", `[${requestId}] completed in ${((Date.now() - startTime) / 1000).toFixed(1)}s, 503 (no content, client may retry with fallback model)`);
+  }
   exitIfNeeded(needsExit);
 }
 
