@@ -20,7 +20,9 @@ export function getCursorSearchPaths(): string[] {
     const localAppData = process.env.LOCALAPPDATA || join(home, "AppData", "Local");
     return [
       join(localAppData, "Programs", "cursor", "resources", "app", "bin", "agent.exe"),
+      join(localAppData, "cursor-agent", "agent.cmd"),
       join(home, ".cursor", "bin", "agent.exe"),
+      join(home, ".cursor", "bin", "agent.cmd"),
       join(home, ".local", "bin", "agent.exe"),
     ];
   }

@@ -22,6 +22,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 
 // ── Configuration ───────────────────────────────────────────────────────────
 
@@ -36,38 +37,67 @@ const INSTANT_RESULT = process.env.CURSOR_PROXY_INSTANT_RESULT !== "false";
 const TARGET_CHARS_PER_SEC = parseInt(process.env.CURSOR_PROXY_STREAM_SPEED || "200", 10);
 const SHORT_TEXT_THRESHOLD = 100;
 const REQUEST_TIMEOUT_MS = parseInt(process.env.CURSOR_PROXY_REQUEST_TIMEOUT || "300000", 10); // 5 min default
+const DEGRADED_TIMEOUT_MS = parseInt(process.env.CURSOR_PROXY_DEGRADED_TIMEOUT || "60000", 10); // 60s when degraded
 const MAX_CONSECUTIVE_FAILURES = parseInt(process.env.CURSOR_PROXY_MAX_CONSECUTIVE_FAILURES || "5", 10);
+const MAX_CONSECUTIVE_TIMEOUTS = parseInt(process.env.CURSOR_PROXY_MAX_CONSECUTIVE_TIMEOUTS || "2", 10);
 
 // ── Request health tracking ─────────────────────────────────────────────────
 
 let consecutiveFailures = 0;
+let consecutiveTimeouts = 0;
 let lastErrorTime = 0;
 let lastErrorMsg = "";
 
-function recordSuccess() {
-  consecutiveFailures = 0;
+function getEffectiveTimeout() {
+  if (consecutiveTimeouts > 0 || consecutiveFailures > 0) return DEGRADED_TIMEOUT_MS;
+  return REQUEST_TIMEOUT_MS;
 }
 
+function recordSuccess() {
+  consecutiveFailures = 0;
+  consecutiveTimeouts = 0;
+}
+
+/** @returns {boolean} true if the process should exit for restart */
+function recordTimeout() {
+  consecutiveTimeouts++;
+  consecutiveFailures++;
+  lastErrorTime = Date.now();
+  lastErrorMsg = "request timeout";
+  if (consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
+    log("error", `${consecutiveTimeouts} consecutive timeouts, cursor-agent appears unresponsive — will exit for restart`);
+    return true;
+  }
+  return false;
+}
+
+/** @returns {boolean} true if the process should exit for restart */
 function recordFailure(stderrSnippet) {
   consecutiveFailures++;
   lastErrorTime = Date.now();
   lastErrorMsg = stderrSnippet || "empty response";
   if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-    log("error", `${consecutiveFailures} consecutive failures (last: ${lastErrorMsg}), self-exiting for restart`);
-    process.exit(2);
+    log("error", `${consecutiveFailures} consecutive failures (last: ${lastErrorMsg}), will exit for restart`);
+    return true;
   }
+  return false;
+}
+
+function exitIfNeeded(shouldExit) {
+  if (shouldExit) setTimeout(() => process.exit(2), 50);
 }
 
 // ── Script identity ─────────────────────────────────────────────────────────
 
 function computeScriptHash() {
   try {
-    const scriptPath = new URL(import.meta.url).pathname;
+    const argvPath = process.argv?.[1];
+    const scriptPath = (argvPath && existsSync(argvPath)) ? argvPath : fileURLToPath(import.meta.url);
     const content = readFileSync(scriptPath, "utf-8");
     return createHash("sha256").update(content).digest("hex").slice(0, 12);
   } catch { return "unknown"; }
 }
-const SCRIPT_HASH = computeScriptHash();
+const SCRIPT_HASH = process.env.CURSOR_PROXY_SCRIPT_HASH || computeScriptHash();
 
 // ── Cursor path auto-detection ──────────────────────────────────────────────
 
@@ -80,7 +110,9 @@ function detectCursorPath() {
   const candidates = isWin
     ? [
         join(process.env.LOCALAPPDATA || join(home, "AppData", "Local"), "Programs", "cursor", "resources", "app", "bin", "agent.exe"),
+        join(process.env.LOCALAPPDATA || join(home, "AppData", "Local"), "cursor-agent", "agent.cmd"),
         join(home, ".cursor", "bin", "agent.exe"),
+        join(home, ".cursor", "bin", "agent.cmd"),
         join(home, ".local", "bin", "agent.exe"),
       ]
     : [
@@ -170,8 +202,8 @@ function localTimestamp() {
 
 function log(level, msg) {
   const line = `${localTimestamp()} [${level}] ${msg}\n`;
-  process.stderr.write(`[cursor-proxy] ${line}`);
   try { appendFileSync(LOG_FILE, line); } catch {}
+  try { process.stderr.write(`[cursor-proxy] ${line}`); } catch {}
 }
 
 function extractUserMessage(messages) {
@@ -236,9 +268,15 @@ function spawnCursorAgent(userMsg, sessionKey, requestModel, { skipSession = fal
   if (model) args.push("--model", model);
   if (cursorSessionId) args.push("--resume", cursorSessionId);
 
+  // On Windows, Cursor may be installed as a .cmd/.bat shim; spawning
+  // these directly without a shell throws EINVAL. Let Node route through
+  // cmd.exe when needed.
+  const needsShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(CURSOR_PATH);
+
   const child = spawn(CURSOR_PATH, args, {
     cwd: WORKSPACE_DIR || undefined,
     env: { ...process.env, ...(process.platform !== "win32" && { SHELL: process.env.SHELL || "/bin/bash" }) },
+    shell: needsShell,
     stdio: ["pipe", "pipe", "pipe"],
   });
   child.stdin.write(userMsg);
@@ -383,8 +421,9 @@ async function handleStream(req, res, body) {
   const requestId = `chatcmpl-${randomUUID().slice(0, 8)}`;
   const msgPreview = userMsg.slice(0, 80).replace(/\n/g, " ");
   const startTime = Date.now();
+  const effectiveTimeout = getEffectiveTimeout();
 
-  log("info", `[${requestId}] stream request: model=${model}, session=${sessionKey || "none"}(${sessionSrc}), msg="${msgPreview}${userMsg.length > 80 ? "…" : ""}"`);
+  log("info", `[${requestId}] stream request: model=${model}, session=${sessionKey || "none"}(${sessionSrc}), timeout=${effectiveTimeout}ms, msg="${msgPreview}${userMsg.length > 80 ? "…" : ""}"`);
 
   let child = spawnCursorAgent(userMsg, sessionKey, model);
   let clientGone = false;
@@ -392,9 +431,9 @@ async function handleStream(req, res, body) {
 
   const timeout = setTimeout(() => {
     timedOut = true;
-    log("warn", `[${requestId}] request timeout after ${REQUEST_TIMEOUT_MS}ms, killing cursor-agent`);
+    log("warn", `[${requestId}] request timeout after ${effectiveTimeout}ms, killing cursor-agent`);
     child.kill();
-  }, REQUEST_TIMEOUT_MS);
+  }, effectiveTimeout);
 
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -418,31 +457,50 @@ async function handleStream(req, res, body) {
   }
 
   if (result.error) {
-    recordFailure(result.error.message?.slice(0, 200));
+    const needsExit = recordFailure(result.error.message?.slice(0, 200));
     clearTimeout(timeout);
     res.end();
+    exitIfNeeded(needsExit);
     return;
   }
 
   const canRetry = !timedOut && !result.hasStreamedContent && !result.resultText
     && child._usedSession && sessionKey;
   if (canRetry) {
+    clearTimeout(timeout);
     sessions.delete(sessionKey);
     saveSessions(sessions);
     log("warn", `[${requestId}] empty response with session, retrying without resume`);
     child = spawnCursorAgent(userMsg, sessionKey, model, { skipSession: true });
+    const retryTimeout = setTimeout(() => {
+      timedOut = true;
+      log("warn", `[${requestId}] retry timeout after ${effectiveTimeout}ms, killing cursor-agent`);
+      child.kill();
+    }, effectiveTimeout);
     result = await processStreamOutput(child, { requestId, model, sessionKey, res });
+    clearTimeout(retryTimeout);
     if (clientGone) return;
-    if (result.error) { recordFailure(result.error.message?.slice(0, 200)); clearTimeout(timeout); res.end(); return; }
+    if (result.error) {
+      const needsExit = recordFailure(result.error.message?.slice(0, 200));
+      res.end();
+      exitIfNeeded(needsExit);
+      return;
+    }
   }
 
   clearTimeout(timeout);
   const elapsed = Date.now() - startTime;
   const hasContent = result.hasStreamedContent || !!result.resultText;
+  let needsExit = false;
 
   if (!hasContent) {
-    recordFailure(child._stderrBuf?.trim().slice(0, 200));
-    res.write(sseEvent(requestId, model, { content: "(no response from cursor-agent)" }));
+    if (timedOut) {
+      needsExit = recordTimeout();
+      res.write(sseEvent(requestId, model, { content: "[Error] cursor-agent request timed out. The AI backend may be temporarily unavailable — the system will auto-restart shortly. Please try again in a moment." }));
+    } else {
+      needsExit = recordFailure(child._stderrBuf?.trim().slice(0, 200));
+      res.write(sseEvent(requestId, model, { content: "(no response from cursor-agent)" }));
+    }
     if (canRetry) log("warn", `[${requestId}] retry also returned empty`);
   } else {
     recordSuccess();
@@ -462,6 +520,7 @@ async function handleStream(req, res, body) {
   res.write("data: [DONE]\n\n");
   res.end();
   log("info", `[${requestId}] completed in ${(elapsed / 1000).toFixed(1)}s, streamed=${result.hasStreamedContent}, resultLen=${result.resultText.length}`);
+  exitIfNeeded(needsExit);
 }
 
 // ── Non-streaming handler ───────────────────────────────────────────────────
@@ -520,8 +579,9 @@ async function handleNonStream(req, res, body) {
   const requestId = `chatcmpl-${randomUUID().slice(0, 8)}`;
   const msgPreview = userMsg.slice(0, 80).replace(/\n/g, " ");
   const startTime = Date.now();
+  const effectiveTimeout = getEffectiveTimeout();
 
-  log("info", `[${requestId}] non-stream request: model=${model}, session=${sessionKey || "none"}(${sessionSrc}), msg="${msgPreview}${userMsg.length > 80 ? "…" : ""}"`);
+  log("info", `[${requestId}] non-stream request: model=${model}, session=${sessionKey || "none"}(${sessionSrc}), timeout=${effectiveTimeout}ms, msg="${msgPreview}${userMsg.length > 80 ? "…" : ""}"`);
 
   const sendError = (err) => {
     res.writeHead(500, { "Content-Type": "application/json" });
@@ -533,46 +593,60 @@ async function handleNonStream(req, res, body) {
 
   const timeout = setTimeout(() => {
     timedOut = true;
-    log("warn", `[${requestId}] request timeout after ${REQUEST_TIMEOUT_MS}ms, killing cursor-agent`);
+    log("warn", `[${requestId}] request timeout after ${effectiveTimeout}ms, killing cursor-agent`);
     child.kill();
-  }, REQUEST_TIMEOUT_MS);
+  }, effectiveTimeout);
 
   let result = await collectNonStreamOutput(child, { requestId, sessionKey });
 
   if (result.error) {
-    recordFailure(result.error.message?.slice(0, 200));
+    const needsExit = recordFailure(result.error.message?.slice(0, 200));
     clearTimeout(timeout);
     sendError(result.error);
+    exitIfNeeded(needsExit);
     return;
   }
 
   let retried = false;
   if (!timedOut && !result.resultText && child._usedSession && sessionKey) {
+    clearTimeout(timeout);
     retried = true;
     sessions.delete(sessionKey);
     saveSessions(sessions);
     log("warn", `[${requestId}] empty response with session, retrying without resume`);
     child = spawnCursorAgent(userMsg, sessionKey, model, { skipSession: true });
+    const retryTimeout = setTimeout(() => {
+      timedOut = true;
+      log("warn", `[${requestId}] retry timeout after ${effectiveTimeout}ms, killing cursor-agent`);
+      child.kill();
+    }, effectiveTimeout);
     result = await collectNonStreamOutput(child, { requestId, sessionKey });
+    clearTimeout(retryTimeout);
     if (result.error) {
-      recordFailure(result.error.message?.slice(0, 200));
-      clearTimeout(timeout);
+      const needsExit = recordFailure(result.error.message?.slice(0, 200));
       sendError(result.error);
+      exitIfNeeded(needsExit);
       return;
     }
   }
 
   clearTimeout(timeout);
+  let needsExit = false;
 
   if (result.resultText) {
     recordSuccess();
     if (retried) log("info", `[${requestId}] retry succeeded`);
+  } else if (timedOut) {
+    needsExit = recordTimeout();
+    if (retried) log("warn", `[${requestId}] retry also timed out`);
   } else {
-    recordFailure(child._stderrBuf?.trim().slice(0, 200));
+    needsExit = recordFailure(child._stderrBuf?.trim().slice(0, 200));
     if (retried) log("warn", `[${requestId}] retry also returned empty`);
   }
 
-  const content = result.resultText || "(no response)";
+  const content = result.resultText || (timedOut
+    ? "[Error] cursor-agent request timed out. The AI backend may be temporarily unavailable — the system will auto-restart shortly. Please try again in a moment."
+    : "(no response)");
 
   res.writeHead(200, { "Content-Type": "application/json" });
   res.end(
@@ -594,6 +668,7 @@ async function handleNonStream(req, res, body) {
     }),
   );
   log("info", `[${requestId}] completed in ${((Date.now() - startTime) / 1000).toFixed(1)}s, resultLen=${content.length}`);
+  exitIfNeeded(needsExit);
 }
 
 // ── Auth & CORS ─────────────────────────────────────────────────────────────
@@ -621,22 +696,23 @@ function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = "";
     let bytes = 0;
+    let settled = false;
+    const fail = (err) => { if (!settled) { settled = true; reject(err); } };
     req.on("data", (c) => {
       bytes += c.length;
       if (bytes > MAX_BODY_BYTES) {
         req.destroy();
-        reject(new Error(`Request body exceeds ${MAX_BODY_BYTES} bytes`));
+        fail(new Error(`Request body exceeds ${MAX_BODY_BYTES} bytes`));
         return;
       }
       data += c;
     });
     req.on("end", () => {
-      try {
-        resolve(JSON.parse(data));
-      } catch (e) {
-        reject(e);
-      }
+      if (settled) return;
+      settled = true;
+      try { resolve(JSON.parse(data)); } catch (e) { reject(e); }
     });
+    req.on("error", (err) => fail(err));
   });
 }
 
@@ -651,8 +727,9 @@ const server = http.createServer(async (req, res) => {
   if (!checkAuth(req, res)) return;
 
   if (req.method === "GET" && req.url === "/v1/health") {
+    const degraded = consecutiveTimeouts > 0 || consecutiveFailures >= 2;
     res.writeHead(200, { "Content-Type": "application/json" });
-    return res.end(JSON.stringify({ status: "ok", cursor: !!CURSOR_PATH, port: PORT, sessions: sessions.size, scriptHash: SCRIPT_HASH, consecutiveFailures, lastErrorTime, lastErrorMsg }));
+    return res.end(JSON.stringify({ status: degraded ? "degraded" : "ok", cursor: !!CURSOR_PATH, port: PORT, sessions: sessions.size, scriptHash: SCRIPT_HASH, consecutiveFailures, consecutiveTimeouts, lastErrorTime, lastErrorMsg }));
   }
 
   if (req.method === "GET" && req.url === "/v1/models") {
@@ -686,6 +763,14 @@ const server = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ error: { message: "Not found" } }));
 });
 
+server.on("error", (err) => {
+  log("error", `HTTP server error: ${err.message}`);
+  if (err.code === "EADDRINUSE") {
+    log("error", `Port ${PORT} already in use — exiting for restart`);
+    process.exit(2);
+  }
+});
+
 server.listen(PORT, "127.0.0.1", () => {
   log("info", `Cursor streaming proxy on http://127.0.0.1:${PORT}`);
   if (CURSOR_PATH) {
@@ -712,3 +797,16 @@ function gracefulShutdown(signal) {
 }
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+
+process.on("uncaughtException", (err) => {
+  const msg = `FATAL uncaughtException: ${err?.stack || err?.message || String(err)}`;
+  try { appendFileSync(LOG_FILE, `${localTimestamp()} [fatal] ${msg}\n`); } catch {}
+  try { process.stderr.write(`[cursor-proxy] ${msg}\n`); } catch {}
+  process.exit(99);
+});
+process.on("unhandledRejection", (reason) => {
+  const msg = `FATAL unhandledRejection: ${reason instanceof Error ? reason.stack : String(reason)}`;
+  try { appendFileSync(LOG_FILE, `${localTimestamp()} [fatal] ${msg}\n`); } catch {}
+  try { process.stderr.write(`[cursor-proxy] ${msg}\n`); } catch {}
+  process.exit(99);
+});

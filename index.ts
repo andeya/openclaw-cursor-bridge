@@ -1,6 +1,6 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
-import { existsSync, readFileSync, writeFileSync, rmSync, realpathSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, appendFileSync, rmSync, realpathSync } from "fs";
 import { createHash } from "crypto";
 import { join } from "path";
 import { homedir } from "os";
@@ -14,9 +14,11 @@ import { PLUGIN_ID, PROVIDER_ID, DEFAULT_PROXY_PORT, OPENCLAW_CONFIG_PATH, getCu
 let proxyChild: ReturnType<typeof spawn> | null = null;
 let proxyRestartCount = 0;
 let lastProxyStartTime = 0;
+let healthCheckTimer: ReturnType<typeof setInterval> | null = null;
 const MAX_PROXY_RESTARTS = 3;
 const PROXY_RESTART_DELAYS = [2000, 10000, 60000];
 const PROXY_STABLE_PERIOD = 300000;
+const HEALTH_CHECK_INTERVAL = 60000; // 60s
 
 // @clack/prompts lives in openclaw's node_modules; follow the bin symlink to resolve
 let _clack: any;
@@ -28,22 +30,20 @@ function loadClack() {
   return _clack;
 }
 
-function isProxyRunning(port: number): boolean {
+function fetchProxyHealth(port: number, timeoutMs = 5000): Record<string, any> | null {
   try {
-    if (process.platform === "win32") {
-      const script = `fetch("http://127.0.0.1:${port}/v1/health").then(r=>process.stdout.write(r.ok?"1":"0")).catch(()=>process.stdout.write("0"))`;
-      const out = execSync(`node -e "${script}"`, {
-        encoding: "utf-8", timeout: 5000, stdio: ["pipe", "pipe", "pipe"],
-      });
-      return out.trim() === "1";
-    }
-    execSync(`curl -sf http://127.0.0.1:${port}/v1/health`, {
-      timeout: 3000, stdio: ["pipe", "pipe", "pipe"],
-    });
-    return true;
+    const cmd = process.platform === "win32"
+      ? `node -e "fetch('http://127.0.0.1:${port}/v1/health').then(r=>r.text()).then(t=>process.stdout.write(t)).catch(()=>process.stdout.write('{}'))"`
+      : `curl -sf http://127.0.0.1:${port}/v1/health`;
+    const raw = execSync(cmd, { encoding: "utf-8", timeout: timeoutMs, stdio: ["pipe", "pipe", "pipe"] });
+    return JSON.parse(raw);
   } catch {
-    return false;
+    return null;
   }
+}
+
+function isProxyRunning(port: number): boolean {
+  return fetchProxyHealth(port) !== null;
 }
 
 function killPortProcess(port: number) {
@@ -104,9 +104,19 @@ function startProxy(opts: { pluginDir: string; cursorPath: string; workspaceDir:
   }
 
   killPortProcess(opts.port);
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+  for (let i = 0; i < 15; i++) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+    if (!isProxyRunning(opts.port)) break;
+  }
 
-  proxyChild = spawn("node", [proxyScript], {
+  const proxyLogPath = join(homedir(), ".openclaw", "cursor-proxy.stderr.log");
+  let stderrBuf = "";
+  const appendProxyStderr = (chunk: string) => {
+    stderrBuf = (stderrBuf + chunk).slice(-50_000);
+    try { appendFileSync(proxyLogPath, chunk); } catch {}
+  };
+
+  const child = spawn("node", [proxyScript], {
     env: {
       ...process.env,
       CURSOR_PATH: opts.cursorPath,
@@ -114,17 +124,34 @@ function startProxy(opts: { pluginDir: string; cursorPath: string; workspaceDir:
       CURSOR_PROXY_PORT: String(opts.port),
       CURSOR_OUTPUT_FORMAT: opts.outputFormat,
       CURSOR_MODEL: opts.cursorModel,
+      CURSOR_PROXY_SCRIPT_HASH: computeFileHash(proxyScript),
     },
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  proxyChild = child;
+
+  child.stderr?.on("data", (d: Buffer | string) => {
+    const s = Buffer.isBuffer(d) ? d.toString("utf-8") : String(d);
+    appendProxyStderr(s);
+  });
+  child.on("error", (err: Error) => {
+    const msg = `[proxy-child-error] ${err?.message || String(err)}\n`;
+    appendProxyStderr(msg);
+    opts.logger.error(`Streaming proxy child process error: ${err?.message || String(err)}`);
   });
 
   lastProxyStartTime = Date.now();
 
-  proxyChild.on("exit", (code) => {
+  child.on("exit", (code) => {
     opts.logger.info(`Streaming proxy exited (code ${code})`);
-    proxyChild = null;
+    if (proxyChild === child) proxyChild = null;
 
-    if (code === 0 || code === null) return;
+    if (code === 0 || code === null || proxyRestartScheduled) return;
+
+    const stderrSnippet = stderrBuf.trim().slice(-2000);
+    if (stderrSnippet) {
+      opts.logger.warn(`Streaming proxy stderr (tail): ${stderrSnippet.replace(/\s+/g, " ").slice(0, 2000)}`);
+    }
 
     const uptime = Date.now() - lastProxyStartTime;
     if (uptime > PROXY_STABLE_PERIOD) proxyRestartCount = 0;
@@ -140,7 +167,36 @@ function startProxy(opts: { pluginDir: string; cursorPath: string; workspaceDir:
     setTimeout(() => startProxy(opts), delay);
   });
 
-  opts.logger.info(`Streaming proxy started on port ${opts.port} (pid ${proxyChild.pid})`);
+  opts.logger.info(`Streaming proxy started on port ${opts.port} (pid ${child.pid})`);
+  startHealthCheck(opts);
+}
+
+let proxyRestartScheduled = false;
+
+function startHealthCheck(opts: { pluginDir: string; cursorPath: string; workspaceDir: string; port: number; outputFormat: OutputFormat; cursorModel: string; logger: any }) {
+  if (healthCheckTimer) clearInterval(healthCheckTimer);
+  proxyRestartScheduled = false;
+  healthCheckTimer = setInterval(() => {
+    if (!proxyChild || proxyRestartScheduled) return;
+    try {
+      const health = fetchProxyHealth(opts.port);
+      if (!health) return;
+      if (health.status === "degraded") {
+        opts.logger.warn(`Proxy health degraded (failures=${health.consecutiveFailures}, timeouts=${health.consecutiveTimeouts}), restarting...`);
+        proxyRestartScheduled = true;
+        if (healthCheckTimer) clearInterval(healthCheckTimer);
+        proxyChild?.kill();
+        proxyChild = null;
+        setTimeout(() => {
+          proxyRestartScheduled = false;
+          startProxy(opts);
+        }, 2000);
+      }
+    } catch {
+      // health check itself failed — proxy may be down, exit handler will restart it
+    }
+  }, HEALTH_CHECK_INTERVAL);
+  healthCheckTimer.unref();
 }
 
 const ZERO_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -357,39 +413,44 @@ const plugin = {
       }
 
       if (result.cursorPath && !isProxyCmd) {
+        const proxyOpts = {
+          pluginDir,
+          cursorPath: result.cursorPath,
+          workspaceDir: ctx.workspaceDir,
+          port: proxyPort,
+          outputFormat: result.outputFormat,
+          cursorModel: (pluginConfig.cursorModel as string) || "",
+          logger: api.logger,
+        };
+
         const proxyRunning = isProxyRunning(proxyPort);
         let needRestart = !proxyRunning;
 
         if (proxyRunning) {
-          try {
-            const healthCmd = process.platform === "win32"
-              ? `node -e "fetch('http://127.0.0.1:${proxyPort}/v1/health').then(r=>r.text()).then(t=>process.stdout.write(t)).catch(()=>process.stdout.write('{}'))"`
-              : `curl -sf http://127.0.0.1:${proxyPort}/v1/health`;
-            const raw = execSync(healthCmd, { encoding: "utf-8", timeout: 3000, stdio: ["pipe", "pipe", "pipe"] });
-            const health = JSON.parse(raw);
+          const health = fetchProxyHealth(proxyPort, 3000);
+          if (health) {
             const proxyScript = join(pluginDir, "mcp-server", "streaming-proxy.mjs");
             const installedHash = computeFileHash(proxyScript);
             if (health.scriptHash !== installedHash) {
               api.logger.info(`Proxy script changed (running=${health.scriptHash}, installed=${installedHash}), restarting...`);
               needRestart = true;
             }
-          } catch {
+          } else {
             needRestart = true;
           }
         }
 
         if (needRestart) {
-          startProxy({
-            pluginDir,
-            cursorPath: result.cursorPath,
-            workspaceDir: ctx.workspaceDir,
-            port: proxyPort,
-            outputFormat: result.outputFormat,
-            cursorModel: (pluginConfig.cursorModel as string) || "",
-            logger: api.logger,
-          });
+          startProxy(proxyOpts);
+        } else if (!proxyChild) {
+          // Proxy is running but not our child (orphan from previous gateway).
+          // Kill it and start a fresh one under this process tree to ensure
+          // proper stdio handling and health monitoring.
+          api.logger.info(`Adopting orphan proxy on port ${proxyPort} — killing and restarting under this gateway`);
+          startProxy(proxyOpts);
         } else {
           api.logger.info(`Streaming proxy up-to-date on port ${proxyPort}`);
+          startHealthCheck(proxyOpts);
         }
       }
     }
@@ -671,15 +732,11 @@ const plugin = {
           let up = false;
           let pid = "";
           let sessions = "";
-          try {
-            const healthCmd = process.platform === "win32"
-              ? `node -e "fetch('http://127.0.0.1:${proxyPort}/v1/health').then(r=>r.text()).then(t=>process.stdout.write(t)).catch(()=>process.stdout.write('{}'))"`
-              : `curl -sf http://127.0.0.1:${proxyPort}/v1/health`;
-            const raw = execSync(healthCmd, { encoding: "utf-8", timeout: 5000, stdio: ["pipe", "pipe", "pipe"] });
-            const health = JSON.parse(raw);
-            up = health.status === "ok";
+          const health = fetchProxyHealth(proxyPort);
+          if (health) {
+            up = health.status === "ok" || health.status === "degraded";
             sessions = String(health.sessions ?? "?");
-          } catch {}
+          }
           if (up) {
             try {
               if (process.platform === "win32") {
@@ -750,6 +807,7 @@ const plugin = {
               CURSOR_PROXY_PORT: String(proxyPort),
               CURSOR_OUTPUT_FORMAT: outputFormat,
               CURSOR_MODEL: (pluginConfig.cursorModel as string) || "",
+              CURSOR_PROXY_SCRIPT_HASH: computeFileHash(proxyScript),
             },
             stdio: "ignore",
             detached: true,
