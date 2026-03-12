@@ -38,8 +38,18 @@ const TARGET_CHARS_PER_SEC = parseInt(process.env.CURSOR_PROXY_STREAM_SPEED || "
 const SHORT_TEXT_THRESHOLD = 100;
 const REQUEST_TIMEOUT_MS = parseInt(process.env.CURSOR_PROXY_REQUEST_TIMEOUT || "300000", 10); // 5 min default
 const DEGRADED_TIMEOUT_MS = parseInt(process.env.CURSOR_PROXY_DEGRADED_TIMEOUT || "180000", 10); // 3 min when degraded (tolerate rate limit)
+/** If child is killed but stdout never closes, resolve anyway after this grace period so we can send 503. */
+const STREAM_RESOLVE_GRACE_MS = parseInt(process.env.CURSOR_PROXY_STREAM_RESOLVE_GRACE_MS || "5000", 10);
+/** User-facing message when request/processing times out (always English). */
+const TIMEOUT_MESSAGE = "Request timed out.";
 const MAX_CONSECUTIVE_FAILURES = parseInt(process.env.CURSOR_PROXY_MAX_CONSECUTIVE_FAILURES || "8", 10);
 const MAX_CONSECUTIVE_TIMEOUTS = parseInt(process.env.CURSOR_PROXY_MAX_CONSECUTIVE_TIMEOUTS || "5", 10);
+
+// Prevent EPIPE from stderr (e.g. when gateway restarts and closes the pipe) from crashing the process.
+process.stderr.on("error", (err) => {
+  if (err?.code === "EPIPE" || err?.errno === 32) return;
+  throw err;
+});
 
 // ── Request health tracking ─────────────────────────────────────────────────
 
@@ -203,7 +213,9 @@ function localTimestamp() {
 function log(level, msg) {
   const line = `${localTimestamp()} [${level}] ${msg}\n`;
   try { appendFileSync(LOG_FILE, line); } catch {}
-  try { process.stderr.write(`[cursor-proxy] ${line}`); } catch {}
+  if (process.stderr.writable) {
+    process.stderr.write(`[cursor-proxy] ${line}`, (err) => { if (err && err?.code !== "EPIPE") process.emit("warning", err); });
+  }
 }
 
 /** Pass through cursor-agent stderr as the user-facing message when there is no response. */
@@ -425,6 +437,34 @@ function processStreamOutput(child, { requestId, model, sessionKey, res, streamS
   });
 }
 
+/** Like processStreamOutput but resolves after effectiveTimeout + STREAM_RESOLVE_GRACE_MS so we never hang when child is killed but stdout never closes. */
+async function processStreamOutputWithTimeout(child, opts, effectiveTimeout) {
+  let graceId;
+  const gracePromise = new Promise((_, reject) => {
+    graceId = setTimeout(() => reject(new Error("STREAM_RESOLVE_TIMEOUT")), effectiveTimeout + STREAM_RESOLVE_GRACE_MS);
+  });
+  try {
+    const result = await Promise.race([
+      processStreamOutput(child, opts).then((r) => {
+        clearTimeout(graceId);
+        return r;
+      }),
+      gracePromise,
+    ]);
+    return result;
+  } catch (err) {
+    clearTimeout(graceId);
+    if (err.message === "STREAM_RESOLVE_TIMEOUT") {
+      log("warn", `[${opts.requestId}] stream resolve timeout (child stdout did not close after kill), sending 503`);
+      try {
+        child.kill("SIGKILL");
+      } catch {}
+      return { resultText: "", hasStreamedContent: false, error: new Error(TIMEOUT_MESSAGE) };
+    }
+    throw err;
+  }
+}
+
 // ── Streaming handler (real-time thinking + smart chunked result) ────────────
 
 function resolveSessionKey(body, req) {
@@ -467,7 +507,7 @@ async function handleStream(req, res, body) {
     log("info", `[${requestId}] client disconnected after ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
   });
 
-  let result = await processStreamOutput(child, { requestId, model, sessionKey, res, streamState });
+  let result = await processStreamOutputWithTimeout(child, { requestId, model, sessionKey, res, streamState }, effectiveTimeout);
 
   if (clientGone) {
     log("info", `[${requestId}] agent finished after client disconnect, ${((Date.now() - startTime) / 1000).toFixed(1)}s, resultLen=${result.resultText.length}`);
@@ -477,7 +517,15 @@ async function handleStream(req, res, body) {
   if (result.error) {
     const needsExit = recordFailure(result.error.message?.slice(0, 200));
     clearTimeout(timeout);
-    res.end();
+    const errMsg = result.error.message || "cursor-agent error";
+    if (!streamState.headersSent) {
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: errMsg, code: "no_response" } }));
+    } else {
+      res.write(sseEvent(requestId, model, { content: `[Error] ${errMsg}` }));
+      res.write("data: [DONE]\n\n");
+      res.end();
+    }
     exitIfNeeded(needsExit);
     return;
   }
@@ -495,12 +543,20 @@ async function handleStream(req, res, body) {
       log("warn", `[${requestId}] retry timeout after ${effectiveTimeout}ms, killing cursor-agent`);
       child.kill();
     }, effectiveTimeout);
-    result = await processStreamOutput(child, { requestId, model, sessionKey, res, streamState });
+    result = await processStreamOutputWithTimeout(child, { requestId, model, sessionKey, res, streamState }, effectiveTimeout);
     clearTimeout(retryTimeout);
     if (clientGone) return;
     if (result.error) {
       const needsExit = recordFailure(result.error.message?.slice(0, 200));
-      res.end();
+      const errMsg = result.error.message || "cursor-agent error";
+      if (!streamState.headersSent) {
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: errMsg, code: "no_response" } }));
+      } else {
+        res.write(sseEvent(requestId, model, { content: `[Error] ${errMsg}` }));
+        res.write("data: [DONE]\n\n");
+        res.end();
+      }
       exitIfNeeded(needsExit);
       return;
     }
@@ -514,9 +570,7 @@ async function handleStream(req, res, body) {
   if (!hasContent) {
     const stderrSnippet = child._stderrBuf?.trim().slice(0, 200);
     needsExit = timedOut ? recordTimeout() : recordFailure(stderrSnippet);
-    const msg = timedOut
-      ? "cursor-agent request timed out. The AI backend may be temporarily unavailable — the system will auto-restart shortly. Please try again in a moment."
-      : formatNoResponseMessage(stderrSnippet);
+    const msg = timedOut ? TIMEOUT_MESSAGE : formatNoResponseMessage(stderrSnippet);
     if (!streamState.headersSent) {
       res.writeHead(503, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: { message: msg, code: "no_response" } }));
@@ -697,9 +751,7 @@ async function handleNonStream(req, res, body) {
   } else {
     const stderrSnippet = child._stderrBuf?.trim().slice(0, 200);
     needsExit = timedOut ? recordTimeout() : recordFailure(stderrSnippet);
-    const errMsg = timedOut
-      ? "cursor-agent request timed out. The AI backend may be temporarily unavailable — the system will auto-restart shortly. Please try again in a moment."
-      : formatNoResponseMessage(stderrSnippet);
+    const errMsg = timedOut ? TIMEOUT_MESSAGE : formatNoResponseMessage(stderrSnippet);
     res.writeHead(503, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: { message: errMsg, code: "no_response" } }));
     log("info", `[${requestId}] completed in ${((Date.now() - startTime) / 1000).toFixed(1)}s, 503 (no content, client may retry with fallback model)`);
