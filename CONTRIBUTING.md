@@ -41,7 +41,7 @@ src/
   constants.ts        → Cross-platform paths and constants
   setup.ts            → Idempotent setup logic (detect Cursor, write configs)
   doctor.ts           → Health check implementation
-  cleanup.ts          → Uninstall cleanup (direct file I/O)
+  scripts/uninstall.mjs → Uninstall: openclaw.json + MCP + extension dir (--config-only for upgrade)
 mcp-server/
   server.mjs          → MCP server (tool discovery + REST proxy)
 skills/

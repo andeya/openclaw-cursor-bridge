@@ -54,8 +54,9 @@ openclaw-cursor-brain/
 ├── src/
 │   ├── constants.ts            # 路径常量、跨平台工具函数
 │   ├── setup.ts                # 幂等安装：Cursor 检测、模型发现、MCP 配置
-│   ├── doctor.ts               # 健康检查（11 项）
-│   └── cleanup.ts              # 卸载清理（3 层）
+│   └── doctor.ts               # 健康检查（11 项）
+├── scripts/
+│   └── uninstall.mjs           # 完整卸载：openclaw.json + MCP + 扩展目录（upgrade 时用 --config-only）
 ├── mcp-server/
 │   ├── server.mjs              # MCP Server：工具发现 + Gateway REST 代理
 │   └── streaming-proxy.mjs     # OpenAI 兼容流式代理
@@ -143,7 +144,7 @@ flowchart TB
         PluginEntry["index.ts<br/>插件入口 / register / CLI"]
         Setup["setup.ts<br/>Cursor 检测 / 模型发现<br/>MCP 配置 / 格式探测"]
         Doctor["doctor.ts<br/>11 项健康检查"]
-        Cleanup["cleanup.ts<br/>3 层卸载清理"]
+        Uninstall["uninstall.mjs<br/>配置 + MCP + 扩展目录清理"]
     end
 
     subgraph runtime ["运行时 (常驻进程)"]
@@ -159,7 +160,7 @@ flowchart TB
 
     PluginEntry -->|"runSetup()"| Setup
     PluginEntry -->|"runDoctorChecks()"| Doctor
-    PluginEntry -->|"runCleanup()"| Cleanup
+    PluginEntry -->|"spawn uninstall.mjs"| Uninstall
     PluginEntry -->|"startProxy()<br/>scriptHash 检测"| Proxy
     Setup -->|"写入 mcp.json"| MCPServer
     Proxy -->|"spawn per request"| AgentCLI
@@ -808,7 +809,7 @@ function spawnCursorAgent(
     "--approve-mcps",
     "--force",
   ];
-  const model = CURSOR_MODEL || mapRequestModel(requestModel);
+  const model = mapRequestModel(requestModel);
   if (model) args.push("--model", model);
   if (cursorSessionId) args.push("--resume", cursorSessionId);
 
@@ -835,7 +836,7 @@ function spawnCursorAgent(
 - `--stream-partial-output`：启用增量输出
 - `--trust --approve-mcps --force`：自动信任 MCP 工具调用
 - `--resume`：复用已有会话
-- `CURSOR_MODEL || mapRequestModel(requestModel)`：全局模型优先，否则从请求参数映射
+- `mapRequestModel(requestModel)`：使用请求中的 model（由 gateway 指定），传给 cursor-agent `--model`
 - `skipSession`：重试时跳过 `--resume`，避免 stale session 导致持续空响应
 
 #### 三层容错机制
@@ -963,17 +964,21 @@ OpenClaw Gateway 在每条用户消息中嵌入 "Conversation info (untrusted me
 
 Gateway 连通性检测使用双平台方案：Unix 用 `curl`（最高效），Windows 回退到 `node -e "fetch(...)"`。
 
-### 5.6 清理模块 (src/cleanup.ts)
+### 5.6 卸载脚本 (scripts/uninstall.mjs)
 
-`runCleanup()` 执行三层清理：
+`scripts/uninstall.mjs` 是配置与环境清理的唯一实现，用法如下：
 
-| 层            | 操作                                                    | 文件                        |
-| ------------- | ------------------------------------------------------- | --------------------------- |
-| MCP 配置      | 删除 `mcpServers.openclaw-gateway` 条目                 | `~/.cursor/mcp.json`        |
-| Provider 注册 | 删除 `models.providers.cursor-local`                    | `~/.openclaw/openclaw.json` |
-| 模型引用      | 清除 `agents.defaults.model` 中的 `cursor-local/*` 引用 | `~/.openclaw/openclaw.json` |
+- **完整卸载**（`openclaw cursor-brain uninstall`）：不加参数，清理 openclaw.json（插件条目、provider、模型引用）、MCP 配置，并删除扩展目录。
+- **升级**（`openclaw cursor-brain upgrade`）：加 `--config-only`，仅清理 openclaw.json 与 MCP 配置，不删扩展目录（由升级流程在重装前删除）。
 
-每层独立执行，某层失败不影响其他层。所有操作都是文件级 JSON 读写，不依赖外部命令。
+| 层           | 操作                                                                 | 文件                        |
+| ------------ | -------------------------------------------------------------------- | --------------------------- |
+| 插件条目     | 删除本插件的 `plugins.entries`、`plugins.installs`、`plugins.allow` | `~/.openclaw/openclaw.json` |
+| Provider/模型 | 删除 `models.providers.cursor-local`，清除 `agents.defaults.model` 中 `cursor-local/*` | `~/.openclaw/openclaw.json` |
+| MCP 配置     | 删除 `mcpServers.openclaw-gateway` 条目                              | `~/.cursor/mcp.json`        |
+| 扩展目录     | `rmSync`（`--config-only` 时跳过）                                  | `~/.openclaw/extensions/openclaw-cursor-brain` |
+
+路径可通过环境变量覆盖：`OPENCLAW_CONFIG_PATH`、`OPENCLAW_EXTENSIONS_DIR`、`CURSOR_MCP_JSON`。
 
 ---
 
@@ -1007,12 +1012,13 @@ openclaw cursor-brain setup     # MCP 配置 + 模型选择
 
 ### 6.2 自动配置的文件
 
-| 文件                                | 写入时机               | 内容                     |
-| ----------------------------------- | ---------------------- | ------------------------ |
-| `~/.cursor/mcp.json`                | `setup` / `register()` | MCP Server 启动配置      |
-| `~/.openclaw/openclaw.json`         | `setup` / `register()` | Provider 配置 + 模型选择 |
-| `~/.openclaw/cursor-sessions.json`  | proxy 运行时           | Session 持久化           |
-| `~/.openclaw/logs/cursor-proxy.log` | proxy 运行时           | Proxy 日志               |
+| 文件                                | 写入时机               | 内容                                                                                                     |
+| ----------------------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------- |
+| `~/.cursor/mcp.json`                | `setup` / `register()` | MCP Server 启动配置                                                                                      |
+| `~/.openclaw/openclaw.json`         | `setup` / `register()` | Provider 配置 + 模型选择                                                                                 |
+| `~/.openclaw/cursor-sessions.json`  | proxy 运行时           | Session 持久化                                                                                           |
+| `~/.openclaw/cursor-proxy.json`     | 插件同步 / proxy 读取  | 持久化 proxy 选项（超时、失败阈值等）。卸载时不删除，便于重装/升级保留；同步为仅合并，升级继承原有配置。 |
+| `~/.openclaw/logs/cursor-proxy.log` | proxy 运行时           | Proxy 日志                                                                                               |
 
 ### 6.3 环境变量完整参考
 
@@ -1028,32 +1034,33 @@ openclaw cursor-brain setup     # MCP 配置 + 模型选择
 
 #### Streaming Proxy 环境变量
 
-| 变量                                    | 默认值        | 说明                                         |
-| --------------------------------------- | ------------- | -------------------------------------------- |
-| `CURSOR_PATH`                           | 自动检测      | cursor-agent 二进制路径                      |
-| `CURSOR_PROXY_PORT`                     | `18790`       | Proxy 监听端口                               |
-| `CURSOR_WORKSPACE_DIR`                  | `""`          | cursor-agent 工作目录                        |
-| `CURSOR_PROXY_API_KEY`                  | `""`          | API Key 认证（空 = 无认证）                  |
-| `CURSOR_OUTPUT_FORMAT`                  | `stream-json` | cursor-agent 输出格式                        |
-| `CURSOR_MODEL`                          | `""`          | 模型覆盖                                     |
-| `CURSOR_PROXY_FORWARD_THINKING`         | `false`       | 转发 LLM 推理过程为 `reasoning_content`      |
-| `CURSOR_PROXY_INSTANT_RESULT`           | `true`        | 批量结果一次性发送（不分块）                 |
-| `CURSOR_PROXY_STREAM_SPEED`             | `200`         | 分块速度（chars/s，仅 INSTANT_RESULT=false） |
-| `CURSOR_PROXY_REQUEST_TIMEOUT`          | `300000`      | 单请求超时（5 分钟）                         |
-| `CURSOR_PROXY_MAX_CONSECUTIVE_FAILURES` | `5`           | 连续失败上限，超过后 proxy 自退出触发重启    |
+| 变量                   | 默认值        | 说明                                |
+| ---------------------- | ------------- | ----------------------------------- |
+| `CURSOR_PATH`          | 自动检测      | cursor-agent 二进制路径             |
+| `CURSOR_PROXY_PORT`    | `18790`       | Proxy 监听端口（独立运行时）        |
+| `CURSOR_WORKSPACE_DIR` | `""`          | cursor-agent 工作目录               |
+| `CURSOR_PROXY_API_KEY` | `""`          | API Key 认证（独立运行，空=无认证） |
+| `CURSOR_OUTPUT_FORMAT` | `stream-json` | cursor-agent 输出格式               |
+
+模型由每次请求中的 `model` 指定（gateway 下发），不设全局覆盖。Proxy 调优（超时、失败/超时阈值、instantResult、forwardThinking、streamSpeed）**不走环境变量**，在插件 config（openclaw.json）中配置，并同步到 `~/.openclaw/cursor-proxy.json`，由 proxy 启动时读取。
 
 ### 6.4 插件配置 Schema
 
-在 `openclaw.json` 的 `plugins.entries.openclaw-cursor-brain.config` 下：
+在 `openclaw.json` 的 `plugins.entries.openclaw-cursor-brain.config` 下。主模型与备用列表不在此处，而在 `agents.defaults.model`（primary + fallbacks 数组）与 `models.providers.cursor-local`。
 
-| 字段            | 类型                        | 默认值   | 说明                      |
-| --------------- | --------------------------- | -------- | ------------------------- |
-| `cursorPath`    | string                      | 自动检测 | cursor-agent 二进制路径   |
-| `model`         | string                      | 交互选择 | 主模型（设置后跳过交互）  |
-| `fallbackModel` | string                      | 交互选择 | 备用模型覆盖              |
-| `cursorModel`   | string                      | `""`     | 直接传递给 `--model` 参数 |
-| `outputFormat`  | `"stream-json"` \| `"json"` | 自动检测 | cursor-agent 输出格式     |
-| `proxyPort`     | number                      | `18790`  | Proxy 监听端口            |
+| 字段                     | 类型                        | 默认值   | 说明                                        |
+| ------------------------ | --------------------------- | -------- | ------------------------------------------- |
+| `cursorPath`             | string                      | 自动检测 | cursor-agent 二进制路径                     |
+| `outputFormat`           | `"stream-json"` \| `"json"` | 自动检测 | cursor-agent 输出格式                       |
+| `proxyPort`              | number                      | `18790`  | Proxy 监听端口                              |
+| `requestTimeout`         | number                      | `300000` | 单请求超时（ms），同步到 cursor-proxy.json  |
+| `degradedTimeout`        | number                      | `300000` | 降级时超时（ms）                            |
+| `maxConsecutiveFailures` | number                      | `8`      | 连续失败上限，超过后 proxy 自退出           |
+| `maxConsecutiveTimeouts` | number                      | `5`      | 连续超时上限，超过后 proxy 自退出           |
+| `streamResolveGraceMs`   | number                      | `5000`   | 杀进程后等待 ms 再返回 503                  |
+| `instantResult`          | boolean                     | `true`   | 批量结果即时发送                            |
+| `forwardThinking`        | boolean                     | `false`  | 流式输出推理为 reasoning_content            |
+| `streamSpeed`            | number                      | `200`    | 分块速度（字符/秒），instantResult=false 时 |
 
 ---
 
@@ -1130,10 +1137,9 @@ Streaming Proxy 可以脱离 OpenClaw 独立运行，将任何 Cursor 变为 Ope
 # 启动
 node mcp-server/streaming-proxy.mjs
 
-# 带配置启动
+# 带配置启动（模型由请求 body 的 model 指定，无需环境变量）
 CURSOR_PROXY_PORT=8080 \
 CURSOR_PROXY_API_KEY=my-secret \
-CURSOR_MODEL=claude-sonnet \
 node mcp-server/streaming-proxy.mjs
 
 # 调用

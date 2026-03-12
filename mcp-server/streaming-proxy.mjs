@@ -26,27 +26,50 @@ import { fileURLToPath } from "node:url";
 
 // ── Configuration ───────────────────────────────────────────────────────────
 
-const PORT = parseInt(process.env.CURSOR_PROXY_PORT || "18790", 10);
-const WORKSPACE_DIR = process.env.CURSOR_WORKSPACE_DIR || "";
-const API_KEY = process.env.CURSOR_PROXY_API_KEY || "";
-const OUTPUT_FORMAT = process.env.CURSOR_OUTPUT_FORMAT || "stream-json";
-const CURSOR_MODEL = process.env.CURSOR_MODEL || "";
+const OPENCLAW_DIR = join(homedir(), ".openclaw");
+const PROXY_CONFIG_PATH = join(OPENCLAW_DIR, "cursor-proxy.json");
+let proxyConfigFile = {};
+try {
+  if (existsSync(PROXY_CONFIG_PATH)) {
+    proxyConfigFile = JSON.parse(readFileSync(PROXY_CONFIG_PATH, "utf-8")) || {};
+  }
+} catch {}
 
-const FORWARD_THINKING = process.env.CURSOR_PROXY_FORWARD_THINKING === "true";
-const INSTANT_RESULT = process.env.CURSOR_PROXY_INSTANT_RESULT !== "false";
-const TARGET_CHARS_PER_SEC = parseInt(process.env.CURSOR_PROXY_STREAM_SPEED || "200", 10);
+/** Read from config file only (no env). Used for options that live in openclaw.json plugin config → cursor-proxy.json. */
+function fromConfig(key, defaultVal, parse = (v) => v) {
+  const v = proxyConfigFile[key];
+  if (v == null || v === "") return defaultVal;
+  return parse(v);
+}
+
+/** File then env (for port/outputFormat etc. when gateway passes env or standalone uses file). */
+function fromConfigOrEnv(key, envKey, defaultVal, parse = (v) => v) {
+  const fromFile = proxyConfigFile[key];
+  const fromEnv = process.env[envKey];
+  if (fromFile != null && fromFile !== "") return parse(fromFile);
+  if (fromEnv != null && fromEnv !== "") return parse(fromEnv);
+  return defaultVal;
+}
+
+const PORT = parseInt(fromConfigOrEnv("port", "CURSOR_PROXY_PORT", "18790"), 10) || 18790;
+const WORKSPACE_DIR = process.env.CURSOR_WORKSPACE_DIR || proxyConfigFile.workspaceDir || "";
+const API_KEY = process.env.CURSOR_PROXY_API_KEY || proxyConfigFile.apiKey || "";
+const OUTPUT_FORMAT = process.env.CURSOR_OUTPUT_FORMAT || proxyConfigFile.outputFormat || "stream-json";
+// Model is taken from each request (gateway-specified); no global override.
+
+const FORWARD_THINKING = fromConfig("forwardThinking", false, (v) => v === true || v === "true");
+const INSTANT_RESULT = fromConfig("instantResult", true, (v) => v !== false && v !== "false");
+const TARGET_CHARS_PER_SEC = parseInt(fromConfig("streamSpeed", "200"), 10) || 200;
 const SHORT_TEXT_THRESHOLD = 100;
-const RAW_REQUEST_TIMEOUT_MS = parseInt(process.env.CURSOR_PROXY_REQUEST_TIMEOUT || "300000", 10); // 5 min default
-const RAW_DEGRADED_TIMEOUT_MS = parseInt(process.env.CURSOR_PROXY_DEGRADED_TIMEOUT || "300000", 10);
-const MIN_TIMEOUT_MS = 60_000; // avoid NaN or 0 killing agent before any output
+const MIN_TIMEOUT_MS = 60_000;
+const RAW_REQUEST_TIMEOUT_MS = parseInt(fromConfig("requestTimeout", "300000"), 10);
+const RAW_DEGRADED_TIMEOUT_MS = parseInt(fromConfig("degradedTimeout", "300000"), 10);
 const REQUEST_TIMEOUT_MS = Number.isFinite(RAW_REQUEST_TIMEOUT_MS) && RAW_REQUEST_TIMEOUT_MS >= MIN_TIMEOUT_MS ? RAW_REQUEST_TIMEOUT_MS : 300000;
 const DEGRADED_TIMEOUT_MS = Number.isFinite(RAW_DEGRADED_TIMEOUT_MS) && RAW_DEGRADED_TIMEOUT_MS >= MIN_TIMEOUT_MS ? RAW_DEGRADED_TIMEOUT_MS : 300000;
-/** If child is killed but stdout never closes, resolve anyway after this grace period so we can send 503. */
-const STREAM_RESOLVE_GRACE_MS = parseInt(process.env.CURSOR_PROXY_STREAM_RESOLVE_GRACE_MS || "5000", 10);
-/** User-facing message when request/processing times out (always English). */
+const STREAM_RESOLVE_GRACE_MS = parseInt(fromConfig("streamResolveGraceMs", "5000"), 10) || 5000;
 const TIMEOUT_MESSAGE = "Request timed out.";
-const MAX_CONSECUTIVE_FAILURES = parseInt(process.env.CURSOR_PROXY_MAX_CONSECUTIVE_FAILURES || "8", 10);
-const MAX_CONSECUTIVE_TIMEOUTS = parseInt(process.env.CURSOR_PROXY_MAX_CONSECUTIVE_TIMEOUTS || "5", 10);
+const MAX_CONSECUTIVE_FAILURES = parseInt(fromConfig("maxConsecutiveFailures", "8"), 10) || 8;
+const MAX_CONSECUTIVE_TIMEOUTS = parseInt(fromConfig("maxConsecutiveTimeouts", "5"), 10) || 5;
 
 // Prevent EPIPE from stderr (e.g. when gateway restarts and closes the pipe) from crashing the process.
 process.stderr.on("error", (err) => {
@@ -168,7 +191,6 @@ const cachedModels = discoverModels();
 
 // ── Persistent sessions ─────────────────────────────────────────────────────
 
-const OPENCLAW_DIR = join(homedir(), ".openclaw");
 const LOGS_DIR = join(OPENCLAW_DIR, "logs");
 const SESSIONS_FILE = join(OPENCLAW_DIR, "cursor-sessions.json");
 const LOG_FILE = join(LOGS_DIR, "cursor-proxy.log");
@@ -289,7 +311,7 @@ async function streamChunked(res, id, model, text) {
 function spawnCursorAgent(userMsg, sessionKey, requestModel, { skipSession = false } = {}) {
   const cursorSessionId = !skipSession && sessionKey ? sessions.get(sessionKey) : null;
   const args = ["-p", "--output-format", OUTPUT_FORMAT, "--stream-partial-output", "--trust", "--approve-mcps", "--force"];
-  const model = CURSOR_MODEL || mapRequestModel(requestModel);
+  const model = mapRequestModel(requestModel);
   if (model) args.push("--model", model);
   if (cursorSessionId) args.push("--resume", cursorSessionId);
 
@@ -879,7 +901,7 @@ server.listen(PORT, "127.0.0.1", () => {
   } else {
     log("warn", "cursor-agent not found — all /v1/chat/completions requests will fail. Set CURSOR_PATH or install Cursor.");
   }
-  log("info", `Model: ${CURSOR_MODEL || "auto"}, Format: ${OUTPUT_FORMAT}, Partial: on, Thinking: ${FORWARD_THINKING ? "forward" : "drop"}, InstantResult: ${INSTANT_RESULT}, SessionAuto: true`);
+  log("info", `Model: from request (gateway), Format: ${OUTPUT_FORMAT}, Partial: on, Thinking: ${FORWARD_THINKING ? "forward" : "drop"}, InstantResult: ${INSTANT_RESULT}, SessionAuto: true`);
   log("info", `Sessions loaded: ${sessions.size} (max ${MAX_SESSIONS})`);
   if (API_KEY) log("info", "API key authentication enabled");
   if (WORKSPACE_DIR) log("info", `Workspace: ${WORKSPACE_DIR}`);

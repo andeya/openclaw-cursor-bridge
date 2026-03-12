@@ -54,8 +54,9 @@ openclaw-cursor-brain/
 ├── src/
 │   ├── constants.ts            # Path constants, cross-platform utilities
 │   ├── setup.ts                # Idempotent setup: Cursor detection, model discovery, MCP config
-│   ├── doctor.ts               # Health checks (11 items)
-│   └── cleanup.ts              # Uninstall cleanup (3 layers)
+│   └── doctor.ts               # Health checks (11 items)
+├── scripts/
+│   └── uninstall.mjs           # Full uninstall: openclaw.json + MCP + extension dir (--config-only for upgrade)
 ├── mcp-server/
 │   ├── server.mjs              # MCP Server: tool discovery + Gateway REST proxy
 │   └── streaming-proxy.mjs     # OpenAI-compatible streaming proxy
@@ -143,7 +144,7 @@ flowchart TB
         PluginEntry["index.ts<br/>Plugin Entry / register / CLI"]
         Setup["setup.ts<br/>Cursor Detection / Model Discovery<br/>MCP Config / Format Detection"]
         Doctor["doctor.ts<br/>11 Health Checks"]
-        Cleanup["cleanup.ts<br/>3-Layer Uninstall Cleanup"]
+        Uninstall["uninstall.mjs<br/>Config + MCP + Extension Cleanup"]
     end
 
     subgraph runtime ["Runtime (Long-Running Processes)"]
@@ -159,7 +160,7 @@ flowchart TB
 
     PluginEntry -->|"runSetup()"| Setup
     PluginEntry -->|"runDoctorChecks()"| Doctor
-    PluginEntry -->|"runCleanup()"| Cleanup
+    PluginEntry -->|"spawn uninstall.mjs"| Uninstall
     PluginEntry -->|"startProxy()<br/>scriptHash check"| Proxy
     Setup -->|"writes mcp.json"| MCPServer
     Proxy -->|"spawn per request"| AgentCLI
@@ -808,7 +809,7 @@ function spawnCursorAgent(
     "--approve-mcps",
     "--force",
   ];
-  const model = CURSOR_MODEL || mapRequestModel(requestModel);
+  const model = mapRequestModel(requestModel);
   if (model) args.push("--model", model);
   if (cursorSessionId) args.push("--resume", cursorSessionId);
 
@@ -835,7 +836,7 @@ Key parameters:
 - `--stream-partial-output`: Enable incremental output
 - `--trust --approve-mcps --force`: Auto-trust MCP tool calls
 - `--resume`: Reuse existing session
-- `CURSOR_MODEL || mapRequestModel(requestModel)`: Global model takes priority, otherwise mapped from request parameter
+- `mapRequestModel(requestModel)`: Use the request's `model` (gateway-specified), passed to cursor-agent as `--model`
 - `skipSession`: Skip `--resume` on retry, avoiding persistent empty responses from stale sessions
 
 #### Three-Layer Fault Tolerance
@@ -963,17 +964,21 @@ When cursor-agent returns a `result` event (rather than streaming `text`):
 
 Gateway connectivity check uses a dual-platform approach: Unix uses `curl` (most efficient), Windows falls back to `node -e "fetch(...)"`.
 
-### 5.6 Cleanup Module (src/cleanup.ts)
+### 5.6 Uninstall Script (scripts/uninstall.mjs)
 
-`runCleanup()` performs three-layer cleanup:
+`scripts/uninstall.mjs` is the single implementation for config and environment cleanup. It is run:
+
+- **Full uninstall** (`openclaw cursor-brain uninstall`): no flags — cleans openclaw.json (plugin entries, provider, model refs), MCP config, and removes the extension directory.
+- **Upgrade** (`openclaw cursor-brain upgrade`): with `--config-only` — cleans openclaw.json and MCP config only; the extension dir is removed by the upgrade flow before reinstalling.
 
 | Layer                 | Operation                                                    | File                        |
 | --------------------- | ------------------------------------------------------------ | --------------------------- |
+| Plugin entries        | Delete `plugins.entries`, `plugins.installs`, `plugins.allow` for this plugin | `~/.openclaw/openclaw.json` |
+| Provider / model refs | Delete `models.providers.cursor-local`, clear `cursor-local/*` in `agents.defaults.model` | `~/.openclaw/openclaw.json` |
 | MCP config            | Delete `mcpServers.openclaw-gateway` entry                   | `~/.cursor/mcp.json`        |
-| Provider registration | Delete `models.providers.cursor-local`                       | `~/.openclaw/openclaw.json` |
-| Model references      | Clear `cursor-local/*` references in `agents.defaults.model` | `~/.openclaw/openclaw.json` |
+| Extension dir          | `rmSync` (skipped when `--config-only`)                     | `~/.openclaw/extensions/openclaw-cursor-brain` |
 
-Each layer executes independently; failure in one doesn't affect others. All operations are file-level JSON read/write, with no external command dependencies.
+Path overrides: `OPENCLAW_CONFIG_PATH`, `OPENCLAW_EXTENSIONS_DIR`, `CURSOR_MCP_JSON`.
 
 ---
 
@@ -1007,12 +1012,13 @@ openclaw cursor-brain setup     # MCP config + model selection
 
 ### 6.2 Auto-Configured Files
 
-| File                                | Write Timing           | Content                           |
-| ----------------------------------- | ---------------------- | --------------------------------- |
-| `~/.cursor/mcp.json`                | `setup` / `register()` | MCP Server startup config         |
-| `~/.openclaw/openclaw.json`         | `setup` / `register()` | Provider config + model selection |
-| `~/.openclaw/cursor-sessions.json`  | Proxy runtime          | Session persistence               |
-| `~/.openclaw/logs/cursor-proxy.log` | Proxy runtime          | Proxy logs                        |
+| File                                | Write Timing             | Content                                                                                                                                                                  |
+| ----------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `~/.cursor/mcp.json`                | `setup` / `register()`   | MCP Server startup config                                                                                                                                                |
+| `~/.openclaw/openclaw.json`         | `setup` / `register()`   | Provider config + model selection                                                                                                                                        |
+| `~/.openclaw/cursor-sessions.json`  | Proxy runtime            | Session persistence                                                                                                                                                      |
+| `~/.openclaw/cursor-proxy.json`     | Plugin sync / proxy read | Persistent proxy options (timeout, failures, etc.). Not removed on uninstall so reinstall/upgrade keep settings; sync is merge-only so upgrade inherits existing values. |
+| `~/.openclaw/logs/cursor-proxy.log` | Proxy runtime            | Proxy logs                                                                                                                                                               |
 
 ### 6.3 Complete Environment Variable Reference
 
@@ -1028,32 +1034,33 @@ openclaw cursor-brain setup     # MCP config + model selection
 
 #### Streaming Proxy Environment Variables
 
-| Variable                                | Default       | Description                                                    |
-| --------------------------------------- | ------------- | -------------------------------------------------------------- |
-| `CURSOR_PATH`                           | Auto-detected | cursor-agent binary path                                       |
-| `CURSOR_PROXY_PORT`                     | `18790`       | Proxy listen port                                              |
-| `CURSOR_WORKSPACE_DIR`                  | `""`          | cursor-agent working directory                                 |
-| `CURSOR_PROXY_API_KEY`                  | `""`          | API Key auth (empty = no auth)                                 |
-| `CURSOR_OUTPUT_FORMAT`                  | `stream-json` | cursor-agent output format                                     |
-| `CURSOR_MODEL`                          | `""`          | Model override                                                 |
-| `CURSOR_PROXY_FORWARD_THINKING`         | `false`       | Forward LLM reasoning as `reasoning_content`                   |
-| `CURSOR_PROXY_INSTANT_RESULT`           | `true`        | Send batch results all at once (no chunking)                   |
-| `CURSOR_PROXY_STREAM_SPEED`             | `200`         | Chunk speed (chars/s, only when INSTANT_RESULT=false)          |
-| `CURSOR_PROXY_REQUEST_TIMEOUT`          | `300000`      | Per-request timeout (5 minutes)                                |
-| `CURSOR_PROXY_MAX_CONSECUTIVE_FAILURES` | `5`           | Consecutive failure limit, proxy self-exits to trigger restart |
+| Variable               | Default       | Description                                |
+| ---------------------- | ------------- | ------------------------------------------ |
+| `CURSOR_PATH`          | Auto-detected | cursor-agent binary path                   |
+| `CURSOR_PROXY_PORT`    | `18790`       | Proxy listen port (standalone)             |
+| `CURSOR_WORKSPACE_DIR` | `""`          | cursor-agent working directory             |
+| `CURSOR_PROXY_API_KEY` | `""`          | API Key auth (standalone, empty = no auth) |
+| `CURSOR_OUTPUT_FORMAT` | `stream-json` | cursor-agent output format                 |
+
+Model is taken from each request's `model` (gateway); no global override. Proxy tuning (timeout, failure thresholds, instantResult, forwardThinking, streamSpeed) is **not** via env; it is configured in plugin config (openclaw.json) and synced to `~/.openclaw/cursor-proxy.json`, which the proxy reads on startup.
 
 ### 6.4 Plugin Configuration Schema
 
-Under `openclaw.json`'s `plugins.entries.openclaw-cursor-brain.config`:
+Under `openclaw.json`'s `plugins.entries.openclaw-cursor-brain.config`. Primary and fallbacks are in `agents.defaults.model` (primary + fallbacks array) and `models.providers.cursor-local`, not in plugin config.
 
-| Field           | Type                        | Default               | Description                                |
-| --------------- | --------------------------- | --------------------- | ------------------------------------------ |
-| `cursorPath`    | string                      | Auto-detected         | cursor-agent binary path                   |
-| `model`         | string                      | Interactive selection | Primary model (skips interaction when set) |
-| `fallbackModel` | string                      | Interactive selection | Fallback model override                    |
-| `cursorModel`   | string                      | `""`                  | Passed directly to `--model` parameter     |
-| `outputFormat`  | `"stream-json"` \| `"json"` | Auto-detected         | cursor-agent output format                 |
-| `proxyPort`     | number                      | `18790`               | Proxy listen port                          |
+| Field                    | Type                        | Default       | Description                                           |
+| ------------------------ | --------------------------- | ------------- | ----------------------------------------------------- |
+| `cursorPath`             | string                      | Auto-detected | cursor-agent binary path                              |
+| `outputFormat`           | `"stream-json"` \| `"json"` | Auto-detected | cursor-agent output format                            |
+| `proxyPort`              | number                      | `18790`       | Proxy listen port                                     |
+| `requestTimeout`         | number                      | `300000`      | Per-request timeout (ms); synced to cursor-proxy.json |
+| `degradedTimeout`        | number                      | `300000`      | Timeout when degraded (ms)                            |
+| `maxConsecutiveFailures` | number                      | `8`           | Consecutive failure limit before proxy exit           |
+| `maxConsecutiveTimeouts` | number                      | `5`           | Consecutive timeout limit before proxy exit           |
+| `streamResolveGraceMs`   | number                      | `5000`        | Grace ms after kill before 503                        |
+| `instantResult`          | boolean                     | `true`        | Send batch results instantly                          |
+| `forwardThinking`        | boolean                     | `false`       | Stream reasoning as reasoning_content                 |
+| `streamSpeed`            | number                      | `200`         | Chunk speed (chars/s) when instantResult=false        |
 
 ---
 
@@ -1130,10 +1137,9 @@ The Streaming Proxy can run independently of OpenClaw, turning any Cursor into a
 # Start
 node mcp-server/streaming-proxy.mjs
 
-# Start with configuration
+# Start with configuration (model from request body, no env)
 CURSOR_PROXY_PORT=8080 \
 CURSOR_PROXY_API_KEY=my-secret \
-CURSOR_MODEL=claude-sonnet \
 node mcp-server/streaming-proxy.mjs
 
 # Call

@@ -2,7 +2,9 @@
   "id": "openclaw-cursor-brain",
   "name": "Cursor Brain",
   "description": "Use Cursor Agent as the AI brain for OpenClaw via MCP",
-  "skills": ["./skills"],
+  "skills": [
+    "./skills"
+  ],
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -11,17 +13,12 @@
         "type": "string",
         "description": "Path to cursor agent binary. Leave empty to auto-detect."
       },
-      "model": {
-        "type": "string",
-        "description": "Primary model (cursor-local/<model>). Usually selected interactively via 'setup' or 'upgrade'. Override here to skip interactive selection."
-      },
-      "fallbackModel": {
-        "type": "string",
-        "description": "Fallback model. Usually selected interactively via 'setup' or 'upgrade'. Override here to skip interactive selection."
-      },
       "outputFormat": {
         "type": "string",
-        "enum": ["stream-json", "json"],
+        "enum": [
+          "stream-json",
+          "json"
+        ],
         "description": "Output format for cursor-agent. Auto-detected if not set. Use 'stream-json' for streaming + thinking blocks, 'json' for batch."
       },
       "proxyPort": {
@@ -29,9 +26,45 @@
         "default": 18790,
         "description": "Port for the local streaming proxy (OpenAI-compatible). Default 18790."
       },
-      "cursorModel": {
-        "type": "string",
-        "description": "Cursor agent model override (e.g. 'sonnet-4.6', 'opus-4.6'). Leave empty for 'auto'. Append '-thinking' for extended thinking (e.g. 'sonnet-4.6-thinking')."
+      "requestTimeout": {
+        "type": "number",
+        "default": 300000,
+        "description": "Per-request timeout in ms. Min 60000. Synced to ~/.openclaw/cursor-proxy.json. Preserved on upgrade."
+      },
+      "degradedTimeout": {
+        "type": "number",
+        "default": 300000,
+        "description": "Timeout in ms when already degraded. Synced to cursor-proxy.json."
+      },
+      "maxConsecutiveFailures": {
+        "type": "number",
+        "default": 8,
+        "description": "Consecutive failure threshold before proxy self-exits. Synced to cursor-proxy.json."
+      },
+      "maxConsecutiveTimeouts": {
+        "type": "number",
+        "default": 5,
+        "description": "Consecutive timeout threshold before proxy self-exits. Synced to cursor-proxy.json."
+      },
+      "streamResolveGraceMs": {
+        "type": "number",
+        "default": 5000,
+        "description": "Grace period in ms after killing child before returning 503. Synced to cursor-proxy.json."
+      },
+      "instantResult": {
+        "type": "boolean",
+        "default": true,
+        "description": "Send batch results instantly. Synced to cursor-proxy.json."
+      },
+      "forwardThinking": {
+        "type": "boolean",
+        "default": false,
+        "description": "Stream LLM reasoning as reasoning_content. Synced to cursor-proxy.json."
+      },
+      "streamSpeed": {
+        "type": "number",
+        "default": 200,
+        "description": "Chunked streaming chars/sec when instantResult is false. Synced to cursor-proxy.json."
       }
     }
   }

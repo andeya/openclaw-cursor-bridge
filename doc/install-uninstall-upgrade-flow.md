@@ -30,7 +30,7 @@
    - **若 result.cursorPath 存在**
      - 构建 provider 配置；若与现有一致且 provider 已存在，则只 `doSyncInstallRecord()`、补默认模型、可选跑交互 setup。
      - 否则从磁盘读 `freshConfig`，用 `patch` 合并 models/agents，**在 patch 里把本插件的 install 记录的 source 规范为合法值**，然后：
-       - **若是 isPluginsInstall**：同步 `writeFileSync` 写 `openclaw.json`，再 `doSyncInstallRecord()`（确保 install 记录里始终有合法 `source`），可选 `runInteractiveSetupAfterInstall()`，最后 `setImmediate(() => fixInstallRecordSourceOnDisk(pluginDir))`，在下一事件循环再修一次磁盘上的 install 记录（防止核心在 register 返回后又写回非法 source）。
+       - **若是 isPluginsInstall**：同步 `writeFileSync` 写 `openclaw.json`，再 `doSyncInstallRecord()`（确保 install 记录里始终有合法 `source`），可选 `runInteractiveSetupInProcess()`，最后 `setImmediate(() => fixInstallRecordSourceOnDisk(pluginDir))`，在下一事件循环再修一次磁盘上的 install 记录（防止核心在 register 返回后又写回非法 source）。
        - **否则**：`api.runtime.config.writeConfigFile(patch)`，再 `doSyncInstallRecord()`。
    - **doSyncInstallRecord()**
      - 总是写入/更新 `plugins.installs[openclaw-cursor-brain]`、`plugins.entries`、`plugins.allow`；**未传 opts.source 时也会根据 installPath 推断并写入合法 source**（目录有 package.json 则 `path`，否则 `npm`），避免核心只认 `npm|archive|path` 而报错。
@@ -63,18 +63,16 @@
 ### 2.2 方式 A：`openclaw cursor-brain uninstall`
 
 1. 插件已加载，执行 `cursor-brain uninstall` 子命令。
-2. `execSync("openclaw plugins uninstall openclaw-cursor-brain", { input: "y\n", ... })`
-   - 子进程中 OpenClaw 核心从配置移除该插件并删除 `~/.openclaw/extensions/openclaw-cursor-brain`。
-3. 若扩展目录仍存在，再 `rmSync(installPath, { recursive: true })`（双保险）。
-4. **runCleanup()**（cleanup.ts）
+2. 执行 **scripts/uninstall.mjs**（无 `--config-only`）
+   - 从 `openclaw.json` 移除 `plugins.entries`、`plugins.installs`、`plugins.allow` 中的本插件，以及 `models.providers["cursor-local"]` 和 `agents.defaults.model` 下所有 `cursor-local/*` 引用；
    - 从 Cursor 的 `mcp.json` 移除本 MCP server；
-   - 从 `openclaw.json` 移除 `models.providers["cursor-local"]` 以及 `agents.defaults.model` 中 primary/fallbacks 下所有 `cursor-local/*` 引用。
-5. **removePluginInstallRecord()**
-   - 从 `openclaw.json` 的 `plugins.installs`、`plugins.entries`、`plugins.allow` 中移除本插件（若核心已在步骤 2 移除，此处为无操作）。
+   - 删除扩展目录 `~/.openclaw/extensions/openclaw-cursor-brain`。
+3. `execSync("openclaw plugins uninstall openclaw-cursor-brain", { input: "y\n", ... })`
+   - 子进程中 OpenClaw 核心从配置移除该插件（若脚本已清理则多为无操作）。
 
 ### 2.3 方式 B：`openclaw plugins uninstall openclaw-cursor-brain`
 
-- 仅核心行为：移除插件登记并删除扩展目录；**不会**执行 runCleanup，因此 MCP 配置和 openclaw 中的 provider/模型引用可能仍保留，需要用户手动清理或再执行一次 `openclaw cursor-brain uninstall`（此时插件已不在，该命令可能不可用）。推荐优先用方式 A。
+- 仅核心行为：移除插件登记并删除扩展目录；**不会**执行 uninstall 脚本，因此 MCP 配置和 openclaw 中的 provider/模型引用可能仍保留，需要用户手动清理或再执行一次 `openclaw cursor-brain uninstall`（此时插件已不在，该命令可能不可用）。推荐优先用方式 A。
 
 ## 3. 升级 (upgrade)
 
@@ -89,7 +87,7 @@
 2. 用户执行 `cursor-brain upgrade <source>`：
    - 版本比较与确认（可选交互）。
    - `execSync("openclaw plugins uninstall openclaw-cursor-brain", { input: "y\n", ... })`，必要时再 `rmSync(installPath)`。
-   - **runCleanup()**，清理 MCP 与 openclaw 中的 provider/模型引用。
+   - 执行 **scripts/uninstall.mjs --config-only**，仅清理 openclaw.json（插件条目、provider、模型引用）与 MCP 配置，不删除扩展目录。
    - `execSync("openclaw plugins install " + source, ...)`
      - 子进程里会重新走「安装」流程，包括 register() 中的 source 修正、doSyncInstallRecord、setImmediate 的 fixInstallRecordSourceOnDisk 等。
    - 安装完成后，在当前进程内调用 **syncPluginInstallRecord({ installPath, source, updateTimestamp: true })**，用正确的 source 再写一次 install 记录。

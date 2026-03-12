@@ -10,6 +10,8 @@ export const DEFAULT_PROXY_PORT = 18790;
 const OPENCLAW_HOME = join(homedir(), ".openclaw");
 export const OPENCLAW_LOGS_DIR = join(OPENCLAW_HOME, "logs");
 export const OPENCLAW_CONFIG_PATH = join(OPENCLAW_HOME, "openclaw.json");
+/** Persistent proxy options (file wins over env). Written by plugin when starting proxy; read by proxy on startup. */
+export const CURSOR_PROXY_CONFIG_PATH = join(OPENCLAW_HOME, "cursor-proxy.json");
 export const CURSOR_PROXY_LOG_PATH = join(OPENCLAW_LOGS_DIR, "cursor-proxy.log");
 export const CURSOR_PROXY_STDERR_LOG_PATH = join(OPENCLAW_LOGS_DIR, "cursor-proxy.stderr.log");
 

@@ -135,8 +135,8 @@ flowchart TD
 - **零配置** — 安装重启即可，一切自动配置
 - **交互式模型选择** — `setup`/`upgrade` 通过 `@clack/prompts` 展示所有发现的模型（主模型单选，备用模型按顺序多选）
 - **动态模型发现** — 自动从 `cursor-agent --list-models` 获取模型列表，每次 Gateway 启动时同步
-- **实时流式** — `--stream-partial-output` 逐字输出；批量结果默认即时发送（`CURSOR_PROXY_INSTANT_RESULT=true`），可选智能分块回退
-- **推理过程转发** — 可选通过 `reasoning_content` 流式输出 LLM 推理过程（`CURSOR_PROXY_FORWARD_THINKING=true`）
+- **实时流式** — `--stream-partial-output` 逐字输出；批量结果默认即时发送（插件 config `instantResult`），可选智能分块回退
+- **推理过程转发** — 可选通过 `reasoning_content` 流式输出 LLM 推理过程（插件 config `forwardThinking`）
 - **丰富工具描述** — MCP 服务器指令包含 token 提取规则、精确 action 键和参数示例（来自 SKILL.md），减少不必要的 `openclaw_skill` 调用
 - **工具调用日志** — proxy 记录每个工具调用的名称、参数摘要、耗时和 call ID，便于诊断
 - **工具自动发现** — 启动时从磁盘 SKILL.md 直接注册（不依赖 Gateway）；后台异步验证用于诊断；60s TTL 缓存
@@ -156,31 +156,25 @@ flowchart TD
 
 在 `openclaw.json` 的 `plugins.entries.openclaw-cursor-brain.config` 下：
 
-| 参数            | 类型   | 默认值      | 说明                                                                      |
-| --------------- | ------ | ----------- | ------------------------------------------------------------------------- |
-| `cursorPath`    | string | 自动探测    | cursor-agent 路径                                                         |
-| `model`         | string | 交互选择    | 主模型（设置后跳过交互选择）                                              |
-| `fallbackModel` | string | 交互选择    | 备用模型覆盖（交互选择支持有序多选）                                      |
-| `cursorModel`   | string | `""` (auto) | 直接传递给 `cursor-agent --model`（如 `sonnet-4.6`、`opus-4.6-thinking`） |
-| `outputFormat`  | string | 自动探测    | `"stream-json"` 或 `"json"`                                               |
-| `proxyPort`     | number | `18790`     | Streaming proxy 端口                                                      |
+| 参数           | 类型   | 默认值   | 说明                        |
+| -------------- | ------ | -------- | --------------------------- |
+| `cursorPath`   | string | 自动探测 | cursor-agent 路径           |
+| `outputFormat` | string | 自动探测 | `"stream-json"` 或 `"json"` |
+| `proxyPort`    | number | `18790`  | Streaming proxy 端口        |
+
+主模型与备用模型**不**写在插件 config 里，而是存在 `agents.defaults.model`（primary + fallbacks 数组）和 `models.providers.cursor-local`。通过 `openclaw cursor-brain setup` 或升级流程交互设置。
 
 <details>
-<summary><strong>环境变量</strong></summary>
+<summary><strong>插件配置与环境变量</strong></summary>
 
-| 变量                                    | 默认值   | 说明                                                                      |
-| --------------------------------------- | -------- | ------------------------------------------------------------------------- |
-| `OPENCLAW_TOOL_TIMEOUT_MS`              | `60000`  | 工具调用超时（毫秒）                                                      |
-| `OPENCLAW_TOOL_RETRY_COUNT`             | `2`      | 瞬态错误重试次数                                                          |
-| `CURSOR_PROXY_INSTANT_RESULT`           | `true`   | 批量结果即时发送（不分块模拟流式）                                        |
-| `CURSOR_PROXY_FORWARD_THINKING`         | `false`  | 将 LLM 推理过程转发为 `reasoning_content`                                 |
-| `CURSOR_PROXY_STREAM_SPEED`             | `200`    | 分块流式速度（字符/秒，仅 `INSTANT_RESULT=false` 时）                     |
-| `CURSOR_PROXY_REQUEST_TIMEOUT`          | `300000` | 单请求超时（毫秒，5 分钟）。小于 60000 或无效时会钳制为 60000 或 300000。 |
-| `CURSOR_PROXY_DEGRADED_TIMEOUT`         | `300000` | 已处于降级状态时的超时（毫秒）。钳制规则同上。                            |
-| `CURSOR_PROXY_MAX_CONSECUTIVE_FAILURES` | `8`      | 连续失败上限，超过后 proxy 自退出触发重启                                 |
-| `CURSOR_PROXY_MAX_CONSECUTIVE_TIMEOUTS` | `5`      | 连续超时上限，超过后 proxy 自退出触发重启                                 |
-| `CURSOR_PROXY_STREAM_RESOLVE_GRACE_MS`  | `5000`   | 杀子进程后等待 stdout 关闭的最长时间（超时则返回 503）                    |
-| `CURSOR_PROXY_API_KEY`                  | _（无）_ | 独立模式 API Key 认证                                                     |
+**Proxy 调优项**（超时、连续失败/超时阈值、流式等）只在 **openclaw.json** 的 `plugins.entries.openclaw-cursor-brain.config` 里配置；OpenClaw 允许插件自定义字段。插件启动 proxy 时会把它们同步到 `~/.openclaw/cursor-proxy.json`，proxy 只读该文件。在插件 config 中设置 `requestTimeout`、`degradedTimeout`、`maxConsecutiveFailures`、`maxConsecutiveTimeouts`、`streamResolveGraceMs`、`instantResult`、`forwardThinking`、`streamSpeed` 等即可。该文件**卸载时不删除**（重装会保留）。**升级**会继承 openclaw.json 中的插件配置（requestTimeout 等）：升级命令在卸载前保存、安装后写回；cursor-proxy.json 为仅合并，原有文件内容会保留。
+
+| 变量                        | 默认值   | 说明                     |
+| --------------------------- | -------- | ------------------------ |
+| `OPENCLAW_TOOL_TIMEOUT_MS`  | `60000`  | MCP 工具调用超时（毫秒） |
+| `OPENCLAW_TOOL_RETRY_COUNT` | `2`      | MCP 瞬态错误重试次数     |
+| `CURSOR_PROXY_PORT`         | `18790`  | 独立运行 proxy 时的端口  |
+| `CURSOR_PROXY_API_KEY`      | _（无）_ | 独立模式 API Key 认证    |
 
 </details>
 
@@ -271,25 +265,26 @@ curl http://127.0.0.1:18790/v1/chat/completions \
 <details>
 <summary><strong>故障排查</strong></summary>
 
-| 问题                                                         | 解决                                                                                                                                                                                                                                                                                                                                                                                      |
-| ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **卡在「Provider synced」后不退出**                          | 旧版在 `plugins install` 时会启动 proxy/定时器导致进程不退出；新版已修复，安装会正常结束。请升级到最新版。                                                                                                                                                                                                                                                                                |
-| **安装时没有主/备模型选择**                                  | 需在 TTY 终端下安装才会自动弹出；否则安装后执行 `openclaw cursor-brain setup` 即可。                                                                                                                                                                                                                                                                                                      |
-| **Invalid config … source / unknown command 'cursor-brain'** | 旧版曾写入非法 `source: "tarball"`。新版会在 register 时自动修正。若仍报错，请打开 `~/.openclaw/openclaw.json`，把 `plugins.installs.openclaw-cursor-brain.source` 改为 `"archive"`（或 `"path"` 若为本地安装），保存后再执行一次 `openclaw plugins install ./`。                                                                                                                         |
-| **plugins.allow / plugins.entries: plugin not found**        | 配置里残留了已卸载插件的引用，且 `openclaw doctor --fix` 可能不会清除。在项目目录执行 **`npm run clean-config`**（或 `node scripts/clean-openclaw-config.mjs`）清理后，再执行 `openclaw plugins install ./`。或手动编辑 `~/.openclaw/openclaw.json`，从 `plugins.allow` 中删掉 `openclaw-cursor-brain`，并删掉 `plugins.entries.openclaw-cursor-brain`。                                  |
-| **No API key found for provider "anthropic"**                | 当前默认模型不是 cursor-local，而是 anthropic（需 API key）。改用本机 Cursor：执行 `openclaw config set agents.defaults.model.primary "cursor-local/auto"`，或运行 `openclaw cursor-brain setup` 选择主模型为 cursor-local/auto，然后 `openclaw gateway restart`。若某 agent 单独指定了 anthropic，用 `openclaw config get agents.list` 查看并改其 `model.primary` 或删/改该 agent 配置。 |
-| "Cursor Agent CLI not found"                                 | 安装 Cursor 并运行一次，或设置 `config.cursorPath`                                                                                                                                                                                                                                                                                                                                        |
-| Gateway 错误                                                 | 确认 Gateway 运行中（`openclaw gateway status`），检查 token                                                                                                                                                                                                                                                                                                                              |
-| 工具未出现                                                   | 重启 Gateway，在 Cursor 中调用 `openclaw_discover`                                                                                                                                                                                                                                                                                                                                        |
-| 工具超时                                                     | 设置 `OPENCLAW_TOOL_TIMEOUT_MS=120000`                                                                                                                                                                                                                                                                                                                                                    |
-| Proxy 未启动                                                 | `openclaw cursor-brain proxy log` 查看日志；`proxy restart` 强制启动                                                                                                                                                                                                                                                                                                                      |
-| **Cursor 限速 / 504 超时 / proxy 频繁退出**                  | 限速时单次请求变慢。默认：请求超时 5 分钟、降级后仍 5 分钟；仅当连续失败 ≥4 或连续超时 ≥2 时 health 才报 degraded，Gateway 才会重启 proxy，避免一次超时就重启。非流式请求会累积 agent 的 text 输出，超时前已有内容会正常返回。飞书等渠道约 50–60 秒回复超时，若 Cursor 经常超过则需减少并发或等限速恢复。                                                                                 |
-| 升级后 Proxy 未更新                                          | Gateway 自动检测 `scriptHash` 变化并重启；用 `curl http://127.0.0.1:18790/v1/health` 验证                                                                                                                                                                                                                                                                                                 |
-| 消息间上下文丢失                                             | 查看 `~/.openclaw/logs/cursor-proxy.log` 中 `session=auto:dm:…(meta.auto)` — 若为 `none(none)` 说明消息中未嵌入元数据                                                                                                                                                                                                                                                                     |
-| 重启后上下文丢失                                             | 会话已自动持久化；用 `proxy restart`（而非 `gateway restart`）可保留会话                                                                                                                                                                                                                                                                                                                  |
-| 批量响应延迟                                                 | `CURSOR_PROXY_INSTANT_RESULT` 默认 `true`；若设为 `false` 则按 ~200 字符/秒分块                                                                                                                                                                                                                                                                                                           |
-| 调试工具调用                                                 | 查看 `~/.openclaw/logs/cursor-proxy.log` 中 `tool:start` / `tool:done` 条目                                                                                                                                                                                                                                                                                                               |
-| 调试 MCP                                                     | `OPENCLAW_GATEWAY_URL=... node mcp-server/server.mjs`                                                                                                                                                                                                                                                                                                                                     |
+| 问题                                                               | 解决                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **WARNING: dangerous code patterns (child_process / env+network)** | OpenClaw 安装时会扫描插件并可能显示此告警。本插件需使用 `child_process` 运行 Cursor agent 与 proxy，并读取环境变量（如 `CURSOR_PATH`）进行配置。插件仅向子进程传递最小化白名单环境变量，不会传递完整 `process.env`。可放心忽略此告警。                                                                                                                                                    |
+| **卡在「Provider synced」后不退出**                                | 旧版在 `plugins install` 时会启动 proxy/定时器导致进程不退出；新版已修复，安装会正常结束。请升级到最新版。                                                                                                                                                                                                                                                                                |
+| **安装时没有主/备模型选择**                                        | 需在 TTY 终端下安装才会自动弹出；否则安装后执行 `openclaw cursor-brain setup` 即可。                                                                                                                                                                                                                                                                                                      |
+| **Invalid config … source / unknown command 'cursor-brain'**       | 旧版曾写入非法 `source: "tarball"`。新版会在 register 时自动修正。若仍报错，请打开 `~/.openclaw/openclaw.json`，把 `plugins.installs.openclaw-cursor-brain.source` 改为 `"archive"`（或 `"path"` 若为本地安装），保存后再执行一次 `openclaw plugins install ./`。                                                                                                                         |
+| **plugins.allow / plugins.entries: plugin not found**              | 配置里残留了已卸载插件的引用，且 `openclaw doctor --fix` 可能不会清除。在项目目录执行 **`npm run uninstall`** 清理后，再执行 `openclaw plugins install ./`。或手动编辑 `~/.openclaw/openclaw.json`，从 `plugins.allow` 中删掉 `openclaw-cursor-brain`，并删掉 `plugins.entries.openclaw-cursor-brain`。                                                                                   |
+| **No API key found for provider "anthropic"**                      | 当前默认模型不是 cursor-local，而是 anthropic（需 API key）。改用本机 Cursor：执行 `openclaw config set agents.defaults.model.primary "cursor-local/auto"`，或运行 `openclaw cursor-brain setup` 选择主模型为 cursor-local/auto，然后 `openclaw gateway restart`。若某 agent 单独指定了 anthropic，用 `openclaw config get agents.list` 查看并改其 `model.primary` 或删/改该 agent 配置。 |
+| "Cursor Agent CLI not found"                                       | 安装 Cursor 并运行一次，或设置 `config.cursorPath`                                                                                                                                                                                                                                                                                                                                        |
+| Gateway 错误                                                       | 确认 Gateway 运行中（`openclaw gateway status`），检查 token                                                                                                                                                                                                                                                                                                                              |
+| 工具未出现                                                         | 重启 Gateway，在 Cursor 中调用 `openclaw_discover`                                                                                                                                                                                                                                                                                                                                        |
+| 工具超时                                                           | 设置 `OPENCLAW_TOOL_TIMEOUT_MS=120000`                                                                                                                                                                                                                                                                                                                                                    |
+| Proxy 未启动                                                       | `openclaw cursor-brain proxy log` 查看日志；`proxy restart` 强制启动                                                                                                                                                                                                                                                                                                                      |
+| **Cursor 限速 / 504 超时 / proxy 频繁退出**                        | 限速时单次请求变慢。默认：请求超时 5 分钟、降级后仍 5 分钟；仅当连续失败 ≥4 或连续超时 ≥2 时 health 才报 degraded，Gateway 才会重启 proxy，避免一次超时就重启。非流式请求会累积 agent 的 text 输出，超时前已有内容会正常返回。飞书等渠道约 50–60 秒回复超时，若 Cursor 经常超过则需减少并发或等限速恢复。                                                                                 |
+| 升级后 Proxy 未更新                                                | Gateway 自动检测 `scriptHash` 变化并重启；用 `curl http://127.0.0.1:18790/v1/health` 验证                                                                                                                                                                                                                                                                                                 |
+| 消息间上下文丢失                                                   | 查看 `~/.openclaw/logs/cursor-proxy.log` 中 `session=auto:dm:…(meta.auto)` — 若为 `none(none)` 说明消息中未嵌入元数据                                                                                                                                                                                                                                                                     |
+| 重启后上下文丢失                                                   | 会话已自动持久化；用 `proxy restart`（而非 `gateway restart`）可保留会话                                                                                                                                                                                                                                                                                                                  |
+| 批量响应延迟                                                       | 在插件 config 中设置 `instantResult: false`，则按 ~200 字符/秒分块                                                                                                                                                                                                                                                                                                                        |
+| 调试工具调用                                                       | 查看 `~/.openclaw/logs/cursor-proxy.log` 中 `tool:start` / `tool:done` 条目                                                                                                                                                                                                                                                                                                               |
+| 调试 MCP                                                           | `OPENCLAW_GATEWAY_URL=... node mcp-server/server.mjs`                                                                                                                                                                                                                                                                                                                                     |
 
 </details>
 
@@ -304,7 +299,8 @@ openclaw-cursor-brain/
     constants.ts            # 路径、ID、输出格式类型
     setup.ts                # 幂等安装、模型发现、格式检测
     doctor.ts               # 健康检查（11 项）
-    cleanup.ts              # 卸载清理
+  scripts/
+    uninstall.mjs           # 卸载：配置 + MCP + 扩展目录
   mcp-server/
     server.mjs              # MCP 服务器（工具发现、超时/重试）
     streaming-proxy.mjs     # OpenAI 兼容流式代理
