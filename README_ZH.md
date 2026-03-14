@@ -136,7 +136,7 @@ flowchart TD
 - **交互式模型选择** — `setup`/`upgrade` 通过 `@clack/prompts` 展示所有发现的模型（主模型单选，备用模型按顺序多选）
 - **动态模型发现** — 自动从 `cursor-agent --list-models` 获取模型列表，每次 Gateway 启动时同步
 - **实时流式** — `--stream-partial-output` 逐字输出；批量结果默认即时发送（插件 config `instantResult`），可选智能分块回退
-- **推理过程转发** — 可选流式输出 LLM 推理过程（插件 config `forwardThinking`）：`"reasoning_content"` 通过标准字段转发，`"content"` 以 markdown 引用格式嵌入正文（兼容 OpenClaw 飞书/Slack 等流式卡片）
+- **推理过程转发** — 可选流式输出 LLM 推理过程（插件 config `forwardThinking`）：`"off"`（默认）不转发；`"reasoning_content"` 通过标准字段；`"content"` 以 markdown 引用嵌入正文（兼容 OpenClaw 飞书/Slack 等流式卡片）
 - **丰富工具描述** — MCP 服务器指令包含 token 提取规则、精确 action 键和参数示例（来自 SKILL.md），减少不必要的 `openclaw_skill` 调用
 - **工具调用日志** — proxy 记录每个工具调用的名称、参数摘要、耗时和 call ID，便于诊断
 - **工具自动发现** — 启动时从磁盘 SKILL.md 直接注册（不依赖 Gateway）；后台异步验证用于诊断；60s TTL 缓存
@@ -167,7 +167,7 @@ flowchart TD
 <details>
 <summary><strong>插件配置与环境变量</strong></summary>
 
-**Proxy 调优项**（超时、连续失败/超时阈值、流式等）只在 **openclaw.json** 的 `plugins.entries.openclaw-cursor-brain.config` 里配置；OpenClaw 允许插件自定义字段。插件启动 proxy 时会把它们同步到 `~/.openclaw/cursor-proxy.json`，proxy 只读该文件。在插件 config 中设置 `requestTimeout`、`degradedTimeout`、`maxConsecutiveFailures`、`maxConsecutiveTimeouts`、`streamResolveGraceMs`、`instantResult`、`forwardThinking`、`streamSpeed` 等即可。该文件**卸载时不删除**（重装会保留）。**升级**会继承 openclaw.json 中的插件配置（requestTimeout 等）：升级命令在卸载前保存、安装后写回；cursor-proxy.json 为仅合并，原有文件内容会保留。
+**单一数据源：** Proxy 调优项**仅**在 **openclaw.json** 的 `plugins.entries.openclaw-cursor-brain.config` 中配置。Proxy 始终只读 openclaw.json：由 gateway 启动时使用 `OPENCLAW_CONFIG_PATH`；**独立运行**（`node streaming-proxy.mjs`）时默认读 `~/.openclaw/openclaw.json`，无需单独配置文件。**卸载**会停止 proxy 并删除可能存在的旧版 `cursor-proxy.json`；**升级**会保留 openclaw.json 中的插件配置。
 
 | 变量                        | 默认值   | 说明                     |
 | --------------------------- | -------- | ------------------------ |

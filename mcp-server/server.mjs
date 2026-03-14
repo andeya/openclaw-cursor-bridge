@@ -78,7 +78,7 @@ async function invokeGatewayTool(tool, args) {
     } catch (err) {
       lastError = err;
       if (attempt < TOOL_RETRY_COUNT && isRetryable(err)) {
-        log("warn", `Tool "${tool}" attempt ${attempt + 1} failed (${err.message}), retrying...`);
+        log("warn", `Tool "${tool}" attempt ${attempt + 1} failed (${err?.message ?? String(err)}), retrying...`);
         await new Promise((r) => setTimeout(r, TOOL_RETRY_DELAY_MS * (attempt + 1)));
         continue;
       }
@@ -507,8 +507,9 @@ for (const [name, localMeta] of candidateToolsForReg) {
         const text = await invokeGatewayTool(name, args);
         return { content: [{ type: "text", text }] };
       } catch (err) {
-        log("error", `Tool "${name}" failed: ${err.message}`);
-        return { content: [{ type: "text", text: `Error: ${err.message}` }], isError: true };
+        const msg = err?.message ?? String(err);
+        log("error", `Tool "${name}" failed: ${msg}`);
+        return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
       }
     },
   );
@@ -544,8 +545,9 @@ server.tool(
       const text = await invokeGatewayTool(params.tool, args);
       return { content: [{ type: "text", text }] };
     } catch (err) {
-      log("error", `openclaw_invoke("${params.tool}") failed: ${err.message}`);
-      return { content: [{ type: "text", text: `Error: ${err.message}` }], isError: true };
+      const msg = err?.message ?? String(err);
+      log("error", `openclaw_invoke("${params.tool}") failed: ${msg}`);
+      return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
     }
   },
 );

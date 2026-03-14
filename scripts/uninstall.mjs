@@ -1,16 +1,17 @@
 #!/usr/bin/env node
 /**
- * Full uninstall: remove plugin entries from openclaw.json, extension dir,
- * MCP server entry from Cursor mcp.json, and provider/model refs from openclaw.json.
+ * Full uninstall: kill streaming proxy, remove cursor-proxy.json, remove plugin entries from openclaw.json,
+ * MCP server entry from Cursor mcp.json, provider/model refs, and extension dir.
  * Reused by: npm run uninstall (standalone), openclaw cursor-brain uninstall, and upgrade (--config-only).
  *
  * Usage: node scripts/uninstall.mjs [--config-only]
- *   --config-only  Only clean openclaw.json + MCP config; do not remove extension dir (used by upgrade).
+ *   --config-only  Only clean openclaw.json + MCP config; do not kill proxy, remove cursor-proxy.json, or extension dir (used by upgrade).
  *   OPENCLAW_CONFIG_PATH, OPENCLAW_EXTENSIONS_DIR, CURSOR_MCP_JSON override paths.
  */
 import { readFileSync, writeFileSync, existsSync, rmSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+import { execSync } from "child_process";
 
 const configOnly = process.argv.includes("--config-only");
 const PLUGIN_ID = "openclaw-cursor-brain";
@@ -26,8 +27,32 @@ const extensionsDir =
 const cursorMcpPath =
   process.env.CURSOR_MCP_JSON ||
   join(homedir(), ".cursor", "mcp.json");
+const cursorProxyPath =
+  join(homedir(), ".openclaw", "cursor-proxy.json");
 
 let hasError = false;
+
+function killPortProcess(port) {
+  try {
+    if (process.platform === "win32") {
+      const out = execSync(`netstat -ano | findstr :${port} | findstr LISTENING`, {
+        encoding: "utf-8", timeout: 5000, stdio: ["pipe", "pipe", "pipe"],
+      }).trim();
+      const pids = new Set(out.split("\n").map((l) => l.trim().split(/\s+/).pop()).filter(Boolean));
+      for (const pid of pids) {
+        try { process.kill(Number(pid), "SIGTERM"); } catch {}
+      }
+    } else {
+      const out = execSync(`lsof -ti :${port}`, { encoding: "utf-8", timeout: 3000, stdio: ["pipe", "pipe", "pipe"] }).trim();
+      if (out) {
+        for (const pid of out.split("\n")) {
+          try { process.kill(Number(pid), "SIGTERM"); } catch {}
+        }
+      }
+    }
+  } catch {}
+}
+
 const log = (msg) => console.log(msg);
 const logErr = (msg) => {
   console.error(msg);
@@ -40,11 +65,27 @@ if (existsSync(configPath)) {
   try {
     cfg = JSON.parse(readFileSync(configPath, "utf-8"));
   } catch (e) {
-    logErr("Could not read config: " + e.message);
+    logErr("Could not read config: " + (e?.message ?? String(e)));
     process.exit(1);
   }
 } else {
   cfg = {};
+}
+
+// ── 0. Kill proxy process and remove cursor-proxy.json (skip when --config-only) ─
+let proxyRemoved = false;
+if (!configOnly) {
+  const proxyPort = Math.floor(Number(cfg?.plugins?.entries?.[PLUGIN_ID]?.config?.proxyPort)) || 18790;
+  killPortProcess(proxyPort);
+  if (existsSync(cursorProxyPath)) {
+    try {
+      rmSync(cursorProxyPath);
+      proxyRemoved = true;
+      log("Stopped proxy and removed " + cursorProxyPath);
+    } catch (e) {
+      logErr("Could not remove cursor-proxy.json: " + (e?.message ?? String(e)));
+    }
+  }
 }
 
 let configChanged = false;
@@ -95,7 +136,7 @@ if (configChanged) {
     writeFileSync(configPath, JSON.stringify(cfg, null, 2) + "\n");
     log("Cleaned openclaw.json (plugin entries + provider + model refs)");
   } catch (e) {
-    logErr("Could not write config: " + e.message);
+    logErr("Could not write config: " + (e?.message ?? String(e)));
     process.exit(1);
   }
 }
@@ -113,7 +154,7 @@ if (existsSync(cursorMcpPath)) {
       log("Removed MCP server from " + cursorMcpPath);
     }
   } catch (e) {
-    logErr("MCP cleanup: " + e.message);
+    logErr("MCP cleanup: " + (e?.message ?? String(e)));
   }
 }
 
@@ -125,11 +166,11 @@ if (!configOnly && existsSync(extensionsDir)) {
     extensionRemoved = true;
     log("Removed extension dir: " + extensionsDir);
   } catch (e) {
-    logErr("Could not remove extension dir: " + e.message);
+    logErr("Could not remove extension dir: " + (e?.message ?? String(e)));
   }
 }
 
-if (!configChanged && !mcpRemoved && !extensionRemoved) {
+if (!configChanged && !mcpRemoved && !extensionRemoved && !proxyRemoved) {
   log("Nothing to remove for " + PLUGIN_ID);
 }
 

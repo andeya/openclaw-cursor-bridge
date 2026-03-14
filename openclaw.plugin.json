@@ -29,45 +29,47 @@
       "requestTimeout": {
         "type": "number",
         "default": 300000,
-        "description": "Per-request timeout in ms. Min 60000. Synced to ~/.openclaw/cursor-proxy.json. Preserved on upgrade."
+        "description": "Per-request timeout in ms. Min 60000. Proxy reads from openclaw.json. Preserved on upgrade."
       },
       "degradedTimeout": {
         "type": "number",
         "default": 300000,
-        "description": "Timeout in ms when already degraded. Synced to cursor-proxy.json."
+        "description": "Timeout in ms when already degraded. Proxy reads from openclaw.json."
       },
       "maxConsecutiveFailures": {
         "type": "number",
         "default": 8,
-        "description": "Consecutive failure threshold before proxy self-exits. Synced to cursor-proxy.json."
+        "description": "Consecutive failure threshold before proxy self-exits. Proxy reads from openclaw.json."
       },
       "maxConsecutiveTimeouts": {
         "type": "number",
         "default": 5,
-        "description": "Consecutive timeout threshold before proxy self-exits. Synced to cursor-proxy.json."
+        "description": "Consecutive timeout threshold before proxy self-exits. Proxy reads from openclaw.json."
       },
       "streamResolveGraceMs": {
         "type": "number",
         "default": 5000,
-        "description": "Grace period in ms after killing child before returning 503. Synced to cursor-proxy.json."
+        "description": "Grace period in ms after killing child before returning 503. Proxy reads from openclaw.json."
       },
       "instantResult": {
         "type": "boolean",
         "default": true,
-        "description": "Send batch results instantly. Synced to cursor-proxy.json."
+        "description": "Send batch results instantly. Proxy reads from openclaw.json."
       },
       "forwardThinking": {
-        "oneOf": [
-          { "type": "boolean" },
-          { "type": "string", "enum": ["content", "reasoning_content"] }
+        "type": "string",
+        "enum": [
+          "off",
+          "content",
+          "reasoning_content"
         ],
-        "default": false,
-        "description": "Stream LLM reasoning. false=drop, true/'reasoning_content'=as reasoning_content field, 'content'=as regular content (markdown blockquote, compatible with OpenClaw streaming cards). Synced to cursor-proxy.json."
+        "default": "off",
+        "description": "How to stream Cursor's thinking output. off: drop (not sent). reasoning_content: send in the reasoning_content field (OpenAI-style). content: send as normal content, markdown blockquote + \"---\" before reply (OpenClaw streaming cards). Proxy reads from openclaw.json."
       },
       "streamSpeed": {
         "type": "number",
         "default": 200,
-        "description": "Chunked streaming chars/sec when instantResult is false. Synced to cursor-proxy.json."
+        "description": "Chunked streaming chars/sec when instantResult is false. Proxy reads from openclaw.json."
       }
     }
   }

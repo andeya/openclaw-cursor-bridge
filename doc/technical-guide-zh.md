@@ -971,12 +971,12 @@ Gateway 连通性检测使用双平台方案：Unix 用 `curl`（最高效），
 - **完整卸载**（`openclaw cursor-brain uninstall`）：不加参数，清理 openclaw.json（插件条目、provider、模型引用）、MCP 配置，并删除扩展目录。
 - **升级**（`openclaw cursor-brain upgrade`）：加 `--config-only`，仅清理 openclaw.json 与 MCP 配置，不删扩展目录（由升级流程在重装前删除）。
 
-| 层           | 操作                                                                 | 文件                        |
-| ------------ | -------------------------------------------------------------------- | --------------------------- |
-| 插件条目     | 删除本插件的 `plugins.entries`、`plugins.installs`、`plugins.allow` | `~/.openclaw/openclaw.json` |
-| Provider/模型 | 删除 `models.providers.cursor-local`，清除 `agents.defaults.model` 中 `cursor-local/*` | `~/.openclaw/openclaw.json` |
-| MCP 配置     | 删除 `mcpServers.openclaw-gateway` 条目                              | `~/.cursor/mcp.json`        |
-| 扩展目录     | `rmSync`（`--config-only` 时跳过）                                  | `~/.openclaw/extensions/openclaw-cursor-brain` |
+| 层            | 操作                                                                                   | 文件                                           |
+| ------------- | -------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| 插件条目      | 删除本插件的 `plugins.entries`、`plugins.installs`、`plugins.allow`                    | `~/.openclaw/openclaw.json`                    |
+| Provider/模型 | 删除 `models.providers.cursor-local`，清除 `agents.defaults.model` 中 `cursor-local/*` | `~/.openclaw/openclaw.json`                    |
+| MCP 配置      | 删除 `mcpServers.openclaw-gateway` 条目                                                | `~/.cursor/mcp.json`                           |
+| 扩展目录      | `rmSync`（`--config-only` 时跳过）                                                     | `~/.openclaw/extensions/openclaw-cursor-brain` |
 
 路径可通过环境变量覆盖：`OPENCLAW_CONFIG_PATH`、`OPENCLAW_EXTENSIONS_DIR`、`CURSOR_MCP_JSON`。
 
@@ -1012,13 +1012,13 @@ openclaw cursor-brain setup     # MCP 配置 + 模型选择
 
 ### 6.2 自动配置的文件
 
-| 文件                                | 写入时机               | 内容                                                                                                     |
-| ----------------------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------- |
-| `~/.cursor/mcp.json`                | `setup` / `register()` | MCP Server 启动配置                                                                                      |
-| `~/.openclaw/openclaw.json`         | `setup` / `register()` | Provider 配置 + 模型选择                                                                                 |
-| `~/.openclaw/cursor-sessions.json`  | proxy 运行时           | Session 持久化                                                                                           |
-| `~/.openclaw/cursor-proxy.json`     | 插件同步 / proxy 读取  | 持久化 proxy 选项（超时、失败阈值等）。卸载时不删除，便于重装/升级保留；同步为仅合并，升级继承原有配置。 |
-| `~/.openclaw/logs/cursor-proxy.log` | proxy 运行时           | Proxy 日志                                                                                               |
+| 文件                                | 写入时机               | 内容                                                                                            |
+| ----------------------------------- | ---------------------- | ----------------------------------------------------------------------------------------------- |
+| `~/.cursor/mcp.json`                | `setup` / `register()` | MCP Server 启动配置                                                                             |
+| `~/.openclaw/openclaw.json`         | `setup` / `register()` | Provider 配置 + 模型选择                                                                        |
+| `~/.openclaw/cursor-sessions.json`  | proxy 运行时           | Session 持久化                                                                                  |
+| _(无)_                              | —                      | Proxy 仅从 openclaw.json 读取配置，无单独文件。卸载时会删除可能存在的旧版 `cursor-proxy.json`。 |
+| `~/.openclaw/logs/cursor-proxy.log` | proxy 运行时           | Proxy 日志                                                                                      |
 
 ### 6.3 环境变量完整参考
 
@@ -1042,25 +1042,25 @@ openclaw cursor-brain setup     # MCP 配置 + 模型选择
 | `CURSOR_PROXY_API_KEY` | `""`          | API Key 认证（独立运行，空=无认证） |
 | `CURSOR_OUTPUT_FORMAT` | `stream-json` | cursor-agent 输出格式               |
 
-模型由每次请求中的 `model` 指定（gateway 下发），不设全局覆盖。Proxy 调优（超时、失败/超时阈值、instantResult、forwardThinking、streamSpeed）**不走环境变量**，在插件 config（openclaw.json）中配置，并同步到 `~/.openclaw/cursor-proxy.json`，由 proxy 启动时读取。
+模型由每次请求中的 `model` 指定（gateway 下发），不设全局覆盖。Proxy 调优（超时、失败/超时阈值、instantResult、forwardThinking、streamSpeed）在插件 config（openclaw.json）中配置，proxy 启动时直接读取 openclaw.json（环境变量 `OPENCLAW_CONFIG_PATH` 或默认 `~/.openclaw/openclaw.json`）。
 
 ### 6.4 插件配置 Schema
 
 在 `openclaw.json` 的 `plugins.entries.openclaw-cursor-brain.config` 下。主模型与备用列表不在此处，而在 `agents.defaults.model`（primary + fallbacks 数组）与 `models.providers.cursor-local`。
 
-| 字段                     | 类型                        | 默认值   | 说明                                        |
-| ------------------------ | --------------------------- | -------- | ------------------------------------------- |
-| `cursorPath`             | string                      | 自动检测 | cursor-agent 二进制路径                     |
-| `outputFormat`           | `"stream-json"` \| `"json"` | 自动检测 | cursor-agent 输出格式                       |
-| `proxyPort`              | number                      | `18790`  | Proxy 监听端口                              |
-| `requestTimeout`         | number                      | `300000` | 单请求超时（ms），同步到 cursor-proxy.json  |
-| `degradedTimeout`        | number                      | `300000` | 降级时超时（ms）                            |
-| `maxConsecutiveFailures` | number                      | `8`      | 连续失败上限，超过后 proxy 自退出           |
-| `maxConsecutiveTimeouts` | number                      | `5`      | 连续超时上限，超过后 proxy 自退出           |
-| `streamResolveGraceMs`   | number                      | `5000`   | 杀进程后等待 ms 再返回 503                  |
-| `instantResult`          | boolean                     | `true`   | 批量结果即时发送                            |
-| `forwardThinking`        | boolean                     | `false`  | 流式输出推理为 reasoning_content            |
-| `streamSpeed`            | number                      | `200`    | 分块速度（字符/秒），instantResult=false 时 |
+| 字段                     | 类型                                                   | 默认值   | 说明                                                                                                           |
+| ------------------------ | ------------------------------------------------------ | -------- | -------------------------------------------------------------------------------------------------------------- |
+| `cursorPath`             | string                                                 | 自动检测 | cursor-agent 二进制路径                                                                                        |
+| `outputFormat`           | `"stream-json"` \| `"json"`                            | 自动检测 | cursor-agent 输出格式                                                                                          |
+| `proxyPort`              | number                                                 | `18790`  | Proxy 监听端口                                                                                                 |
+| `requestTimeout`         | number                                                 | `300000` | 单请求超时（ms），proxy 从 openclaw.json 读取                                                                  |
+| `degradedTimeout`        | number                                                 | `300000` | 降级时超时（ms）                                                                                               |
+| `maxConsecutiveFailures` | number                                                 | `8`      | 连续失败上限，超过后 proxy 自退出                                                                              |
+| `maxConsecutiveTimeouts` | number                                                 | `5`      | 连续超时上限，超过后 proxy 自退出                                                                              |
+| `streamResolveGraceMs`   | number                                                 | `5000`   | 杀进程后等待 ms 再返回 503                                                                                     |
+| `instantResult`          | boolean                                                | `true`   | 批量结果即时发送                                                                                               |
+| `forwardThinking`        | 字符串 `"off"` \| `"content"` \| `"reasoning_content"` | `"off"`  | `off`：不转发；`reasoning_content`：以 reasoning_content 字段流式输出；`content`：以正文 markdown 引用流式输出 |
+| `streamSpeed`            | number                                                 | `200`    | 分块速度（字符/秒），instantResult=false 时                                                                    |
 
 ---
 

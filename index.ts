@@ -8,7 +8,7 @@ import { execSync, spawn } from "child_process";
 import { createRequire } from "module";
 import { runSetup, type SetupContext, type CursorModel, detectCursorPath, detectOutputFormat, discoverCursorModels } from "./src/setup.js";
 import { runDoctorChecks, formatDoctorResults, countDiscoveredTools } from "./src/doctor.js";
-import { PLUGIN_ID, PROVIDER_ID, DEFAULT_PROXY_PORT, OPENCLAW_CONFIG_PATH, OPENCLAW_LOGS_DIR, CURSOR_PROXY_CONFIG_PATH, CURSOR_PROXY_LOG_PATH, CURSOR_PROXY_STDERR_LOG_PATH, getCursorMcpConfigPath, type OutputFormat } from "./src/constants.js";
+import { PLUGIN_ID, PROVIDER_ID, DEFAULT_PROXY_PORT, OPENCLAW_CONFIG_PATH, OPENCLAW_LOGS_DIR, CURSOR_PROXY_LOG_PATH, CURSOR_PROXY_STDERR_LOG_PATH, getCursorMcpConfigPath, type OutputFormat } from "./src/constants.js";
 
 let proxyChild: ReturnType<typeof spawn> | null = null;
 let proxyRestartCount = 0;
@@ -94,7 +94,7 @@ async function runInteractiveSetupInProcess(opts: {
       saveModelSelection(selection.primary, selection.fallbacks, opts.proxyPort, opts.result.cursorModels);
       clack.log.success("Model configuration saved to openclaw.json (agents.defaults.model + providers)");
     } catch (e: any) {
-      clack.log.error(`Could not save model config: ${e.message}`);
+      clack.log.error(`Could not save model config: ${e?.message ?? String(e)}`);
     }
   }
 
@@ -104,12 +104,12 @@ async function runInteractiveSetupInProcess(opts: {
       mergePluginConfig(configResult);
       clack.log.success("Plugin configuration saved to openclaw.json");
     } catch (e: any) {
-      clack.log.error(`Could not save config: ${e.message}`);
+      clack.log.error(`Could not save config: ${e?.message ?? String(e)}`);
     }
   }
 
   try {
-    syncPluginInstallRecord({ installPath: opts.pluginDir, updateTimestamp: false });
+    syncPluginInstallRecord({ installPath: opts.pluginDir, updateTimestamp: false, preservedConfig: configResult ?? undefined });
   } catch {}
 
   const savedSelection = selection;
@@ -143,12 +143,6 @@ function compareSemver(a: string, b: string): number {
   return 0;
 }
 
-/** Plugin config keys that are synced to ~/.openclaw/cursor-proxy.json (proxy reads them). Must be single-source in plugin config only. */
-const PROXY_CONFIG_KEYS = [
-  "requestTimeout", "degradedTimeout", "maxConsecutiveFailures", "maxConsecutiveTimeouts",
-  "streamResolveGraceMs", "instantResult", "forwardThinking", "streamSpeed", "outputFormat",
-] as const;
-
 /**
  * Keys that must not be stored in plugin config (single source is agents.defaults.model + models.providers).
  * Rule: plugins.entries[PLUGIN_ID].config only stores keys that are the single source of truth and directly used; no duplication of data that lives elsewhere.
@@ -169,6 +163,7 @@ function buildProxyChildEnv(vars: {
     HOME: e.HOME ?? e.USERPROFILE ?? "",
     USER: e.USER ?? e.USERNAME ?? "",
     LANG: e.LANG ?? "en_US.UTF-8",
+    OPENCLAW_CONFIG_PATH: OPENCLAW_CONFIG_PATH,
     ...vars,
   };
   if (process.platform === "win32") {
@@ -177,26 +172,6 @@ function buildProxyChildEnv(vars: {
     env.TEMP = e.TEMP ?? e.TMP ?? "";
   }
   return env;
-}
-
-/** Sync plugin config into persistent proxy config file (~/.openclaw/cursor-proxy.json). Only syncs keys in PROXY_CONFIG_KEYS + proxyPort; excludes PLUGIN_CONFIG_EXCLUDE_KEYS. Merge-only; file not removed on uninstall. */
-function syncProxyConfigFile(pluginConfig: Record<string, unknown>): void {
-  try {
-    let data: Record<string, unknown> = {};
-    if (existsSync(CURSOR_PROXY_CONFIG_PATH)) {
-      try {
-        data = JSON.parse(readFileSync(CURSOR_PROXY_CONFIG_PATH, "utf-8")) || {};
-      } catch {}
-    }
-    for (const key of PROXY_CONFIG_KEYS) {
-      if (PLUGIN_CONFIG_EXCLUDE_KEYS.has(key)) continue;
-      const v = pluginConfig[key];
-      if (v !== undefined && v !== null) data[key] = v;
-    }
-    if (pluginConfig.proxyPort != null) data.port = pluginConfig.proxyPort;
-    mkdirSync(dirname(CURSOR_PROXY_CONFIG_PATH), { recursive: true });
-    writeFileSync(CURSOR_PROXY_CONFIG_PATH, JSON.stringify(data, null, 2) + "\n");
-  } catch {}
 }
 
 function startProxy(opts: {
@@ -220,6 +195,8 @@ function startProxy(opts: {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
     if (!isProxyRunning(opts.port)) break;
   }
+  // Brief wait so the OS releases the port after the killed process exits (avoids EADDRINUSE on spawn).
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
 
   try { mkdirSync(OPENCLAW_LOGS_DIR, { recursive: true }); } catch {}
   let stderrBuf = "";
@@ -641,6 +618,8 @@ function syncPluginInstallRecord(opts: {
   installPath: string;
   source?: string;
   updateTimestamp?: boolean;
+  /** When set (e.g. after interactive setup), merged on top so user choices are not overwritten by core defaults. */
+  preservedConfig?: Record<string, unknown>;
 }): void {
   let config: Record<string, any> = {};
   try { config = JSON.parse(readFileSync(OPENCLAW_CONFIG_PATH, "utf-8")); } catch {}
@@ -650,7 +629,7 @@ function syncPluginInstallRecord(opts: {
   const installs = plugins.installs || {};
   const entry = entries[PLUGIN_ID] || {};
   const defaultConfig = getPluginConfigDefaults();
-  const mergedConfig: Record<string, unknown> = { ...defaultConfig, ...entry.config };
+  const mergedConfig: Record<string, unknown> = { ...defaultConfig, ...entry.config, ...(opts.preservedConfig || {}) };
   for (const k of PLUGIN_CONFIG_EXCLUDE_KEYS) delete mergedConfig[k];
   entries[PLUGIN_ID] = { ...entry, enabled: true, config: mergedConfig };
 
@@ -806,7 +785,7 @@ const plugin = {
         try {
           syncPluginInstallRecord({ installPath: pluginDir, updateTimestamp: false });
         } catch (e: any) {
-          api.logger.warn(`Could not sync install record: ${e.message}`);
+          api.logger.warn(`Could not sync install record: ${e?.message ?? String(e)}`);
         }
       };
 
@@ -838,7 +817,7 @@ const plugin = {
                 api.logger.info(`Default model set to ${PROVIDER_ID}/${primary}`);
               }
             } catch (e: any) {
-              api.logger.warn(`Could not set default model: ${e.message}`);
+              api.logger.warn(`Could not set default model: ${e?.message ?? String(e)}`);
             }
             if (runInteractiveSetup) return runInteractiveSetupInProcess({ pluginDir, config, pluginConfig: pluginConfig as Record<string, unknown>, result, proxyPort });
           } else {
@@ -895,7 +874,7 @@ const plugin = {
                 if (runInteractiveSetup) return runInteractiveSetupInProcess({ pluginDir, config, pluginConfig: pluginConfig as Record<string, unknown>, result, proxyPort });
                 setImmediate(() => fixInstallRecordSourceOnDisk(pluginDir));
               } catch (err: any) {
-                api.logger.warn(`Could not write config: ${err.message}`);
+                api.logger.warn(`Could not write config: ${err?.message ?? String(err)}`);
                 doSyncInstallRecord();
                 if (runInteractiveSetup) return runInteractiveSetupInProcess({ pluginDir, config, pluginConfig: pluginConfig as Record<string, unknown>, result, proxyPort });
                 setImmediate(() => fixInstallRecordSourceOnDisk(pluginDir));
@@ -905,13 +884,13 @@ const plugin = {
                 api.logger.info(`Provider "${PROVIDER_ID}" synced (${discovered.length} models, port ${proxyPort})`);
                 doSyncInstallRecord();
               }).catch((err: any) => {
-                api.logger.warn(`Could not write config: ${err.message}`);
+                api.logger.warn(`Could not write config: ${err?.message ?? String(err)}`);
                 doSyncInstallRecord();
               });
             }
           }
         } catch (e: any) {
-          api.logger.warn(`Could not auto-configure: ${e.message}`);
+          api.logger.warn(`Could not auto-configure: ${e?.message ?? String(e)}`);
           doSyncInstallRecord();
           if (isPluginsInstall) setImmediate(() => fixInstallRecordSourceOnDisk(pluginDir));
         }
@@ -921,7 +900,6 @@ const plugin = {
       }
 
       if (result.cursorPath && !isProxyCmd && !isPluginsInstall && !isSetupOnly) {
-        syncProxyConfigFile(pluginConfig as Record<string, unknown>);
         const proxyOpts = {
           pluginDir,
           cursorPath: result.cursorPath,
@@ -1008,7 +986,7 @@ const plugin = {
               saveModelSelection(selection.primary, selection.fallbacks, proxyPort, result.cursorModels);
               clack.log.success("Model configuration saved to openclaw.json (agents.defaults.model + providers)");
             } catch (e: any) {
-              clack.log.error(`Could not save model config: ${e.message}`);
+              clack.log.error(`Could not save model config: ${e?.message ?? String(e)}`);
             }
           }
           const configResult = await promptPluginConfig(pluginConfig as Record<string, unknown>);
@@ -1017,11 +995,11 @@ const plugin = {
               mergePluginConfig(configResult);
               clack.log.success("Plugin configuration saved to openclaw.json");
             } catch (e: any) {
-              clack.log.error(`Could not save config: ${e.message}`);
+              clack.log.error(`Could not save config: ${e?.message ?? String(e)}`);
             }
           }
           try {
-            syncPluginInstallRecord({ installPath: pluginDir, updateTimestamp: false });
+            syncPluginInstallRecord({ installPath: pluginDir, updateTimestamp: false, preservedConfig: configResult ?? undefined });
           } catch {}
           clack.outro("Run `openclaw gateway restart` to apply changes");
           process.exit(0);
@@ -1274,7 +1252,7 @@ const plugin = {
           try {
             syncPluginInstallRecord({ installPath, source: installSource, updateTimestamp: true });
           } catch (e: any) {
-            clack.log.warn(`Could not sync install record: ${e.message}`);
+            clack.log.warn(`Could not sync install record: ${e?.message ?? String(e)}`);
           }
 
           if (savedPluginConfig && Object.keys(savedPluginConfig).length > 0) {
@@ -1391,7 +1369,6 @@ const plugin = {
             await new Promise((r) => setTimeout(r, 500));
           }
 
-          syncProxyConfigFile(pluginConfig as Record<string, unknown>);
           const outputFormat = detectOutputFormat(cursorPath, pluginConfig.outputFormat as string | undefined);
           const child = spawn("node", [proxyScript], {
             env: buildProxyChildEnv({

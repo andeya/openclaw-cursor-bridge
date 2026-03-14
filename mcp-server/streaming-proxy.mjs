@@ -27,15 +27,20 @@ import { fileURLToPath } from "node:url";
 // ── Configuration ───────────────────────────────────────────────────────────
 
 const OPENCLAW_DIR = join(homedir(), ".openclaw");
-const PROXY_CONFIG_PATH = join(OPENCLAW_DIR, "cursor-proxy.json");
-let proxyConfigFile = {};
-try {
-  if (existsSync(PROXY_CONFIG_PATH)) {
-    proxyConfigFile = JSON.parse(readFileSync(PROXY_CONFIG_PATH, "utf-8")) || {};
-  }
-} catch {}
+const PLUGIN_ID = "openclaw-cursor-brain";
 
-/** Read from config file only (no env). Used for options that live in openclaw.json plugin config → cursor-proxy.json. */
+// Single source of truth: openclaw.json (env OPENCLAW_CONFIG_PATH or default ~/.openclaw/openclaw.json)
+const openclawPath = process.env.OPENCLAW_CONFIG_PATH || join(OPENCLAW_DIR, "openclaw.json");
+let proxyConfigFile = {};
+if (existsSync(openclawPath)) {
+  try {
+    const cfg = JSON.parse(readFileSync(openclawPath, "utf-8"));
+    const pluginConfig = cfg?.plugins?.entries?.[PLUGIN_ID]?.config || {};
+    proxyConfigFile = { ...pluginConfig, port: pluginConfig.proxyPort ?? 18790 };
+  } catch {}
+}
+
+/** Read from openclaw.json plugin config (no env). */
 function fromConfig(key, defaultVal, parse = (v) => v) {
   const v = proxyConfigFile[key];
   if (v == null || v === "") return defaultVal;
@@ -57,10 +62,10 @@ const API_KEY = process.env.CURSOR_PROXY_API_KEY || proxyConfigFile.apiKey || ""
 const OUTPUT_FORMAT = process.env.CURSOR_OUTPUT_FORMAT || proxyConfigFile.outputFormat || "stream-json";
 // Model is taken from each request (gateway-specified); no global override.
 
-const RAW_FORWARD_THINKING = fromConfig("forwardThinking", false, (v) => {
+const RAW_FORWARD_THINKING = fromConfig("forwardThinking", "off", (v) => {
   if (v === "content") return "content";
-  if (v === true || v === "true" || v === "reasoning_content") return "reasoning_content";
-  return false;
+  if (v === "reasoning_content" || v === true || v === "true") return "reasoning_content";
+  return false; // "off", "false", or unknown
 });
 const FORWARD_THINKING = RAW_FORWARD_THINKING !== false;
 const INSTANT_RESULT = fromConfig("instantResult", true, (v) => v !== false && v !== "false");
@@ -484,7 +489,7 @@ function processStreamOutput(child, { requestId, model, sessionKey, res, streamS
 
     child.on("error", (err) => {
       error = err;
-      log("error", `[${requestId}] cursor-agent spawn error: ${err.message}`);
+      log("error", `[${requestId}] cursor-agent spawn error: ${err?.message ?? String(err)}`);
       done();
     });
 
@@ -509,7 +514,7 @@ async function processStreamOutputWithTimeout(child, opts, effectiveTimeout) {
     return result;
   } catch (err) {
     clearTimeout(graceId);
-    if (err.message === "STREAM_RESOLVE_TIMEOUT") {
+    if ((err?.message ?? String(err)) === "STREAM_RESOLVE_TIMEOUT") {
       log("warn", `[${opts.requestId}] stream resolve timeout (child stdout did not close after kill), sending 503`);
       try {
         child.kill("SIGKILL");
@@ -572,9 +577,10 @@ async function handleStream(req, res, body) {
   }
 
   if (result.error) {
-    const needsExit = recordFailure(result.error.message?.slice(0, 200));
+    const errStr = result.error?.message ?? String(result.error);
+    const needsExit = recordFailure(errStr.slice(0, 200));
     clearTimeout(timeout);
-    const errMsg = result.error.message || "cursor-agent error";
+    const errMsg = errStr || "cursor-agent error";
     log("info", `[${requestId}] 503 reason=error elapsed=${((Date.now() - startTime) / 1000).toFixed(1)}s error="${errMsg.replace(/"/g, "'")}"`);
     if (!streamState.headersSent) {
       res.writeHead(503, { "Content-Type": "application/json" });
@@ -605,8 +611,9 @@ async function handleStream(req, res, body) {
     clearTimeout(retryTimeout);
     if (clientGone) return;
     if (result.error) {
-      const needsExit = recordFailure(result.error.message?.slice(0, 200));
-      const errMsg = result.error.message || "cursor-agent error";
+      const errStr = result.error?.message ?? String(result.error);
+      const needsExit = recordFailure(errStr.slice(0, 200));
+      const errMsg = errStr || "cursor-agent error";
       if (!streamState.headersSent) {
         res.writeHead(503, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: { message: errMsg, code: "no_response" } }));
@@ -638,7 +645,7 @@ async function handleStream(req, res, body) {
       exitIfNeeded(needsExit);
       return;
     }
-    if (timedOut) needsExit = recordTimeout();
+    // needsExit already set above when timedOut; do not call recordTimeout() again (would double-count)
     res.write(sseEvent(requestId, model, { content: `[Error] ${msg}` }));
     if (canRetry) log("warn", `[${requestId}] retry also returned empty`);
   } else {
@@ -708,7 +715,7 @@ function collectNonStreamOutput(child, { requestId, sessionKey }) {
 
     child.on("error", (err) => {
       error = err;
-      log("error", `[${requestId}] cursor-agent spawn error: ${err.message}`);
+      log("error", `[${requestId}] cursor-agent spawn error: ${err?.message ?? String(err)}`);
       done();
     });
     child.on("close", () => done());
@@ -728,7 +735,7 @@ async function handleNonStream(req, res, body) {
 
   const sendError = (err) => {
     res.writeHead(500, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: { message: `cursor-agent error: ${err.message}` } }));
+    res.end(JSON.stringify({ error: { message: `cursor-agent error: ${err?.message ?? String(err)}` } }));
   };
 
   let child = spawnCursorAgent(userMsg, sessionKey, model);
@@ -743,7 +750,8 @@ async function handleNonStream(req, res, body) {
   let result = await collectNonStreamOutput(child, { requestId, sessionKey });
 
   if (result.error) {
-    const needsExit = recordFailure(result.error.message?.slice(0, 200));
+    const errStr = result.error?.message ?? String(result.error);
+    const needsExit = recordFailure(errStr.slice(0, 200));
     clearTimeout(timeout);
     sendError(result.error);
     exitIfNeeded(needsExit);
@@ -766,7 +774,8 @@ async function handleNonStream(req, res, body) {
     result = await collectNonStreamOutput(child, { requestId, sessionKey });
     clearTimeout(retryTimeout);
     if (result.error) {
-      const needsExit = recordFailure(result.error.message?.slice(0, 200));
+      const errStr = result.error?.message ?? String(result.error);
+      const needsExit = recordFailure(errStr.slice(0, 200));
       sendError(result.error);
       exitIfNeeded(needsExit);
       return;
@@ -914,21 +923,21 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.on("error", (err) => {
-  log("error", `HTTP server error: ${err.message}`);
-  if (err.code === "EADDRINUSE") {
+  log("error", `HTTP server error: ${err?.message ?? String(err)}`);
+  if (err?.code === "EADDRINUSE") {
     log("error", `Port ${PORT} already in use — exiting for restart`);
     process.exit(2);
   }
 });
 
-server.listen(PORT, "127.0.0.1", () => {
+server.listen({ port: PORT, host: "127.0.0.1", reuseAddress: true }, () => {
   log("info", `Cursor streaming proxy on http://127.0.0.1:${PORT}`);
   if (CURSOR_PATH) {
     log("info", `Cursor agent: ${CURSOR_PATH}`);
   } else {
     log("warn", "cursor-agent not found — all /v1/chat/completions requests will fail. Set CURSOR_PATH or install Cursor.");
   }
-  log("info", `Model: from request (gateway), Format: ${OUTPUT_FORMAT}, Partial: on, Thinking: ${RAW_FORWARD_THINKING || "drop"}, InstantResult: ${INSTANT_RESULT}, SessionAuto: true`);
+  log("info", `Model: from request (gateway), Format: ${OUTPUT_FORMAT}, Partial: on, Thinking: ${RAW_FORWARD_THINKING || "off"}, InstantResult: ${INSTANT_RESULT}, SessionAuto: true`);
   log("info", `Sessions loaded: ${sessions.size} (max ${MAX_SESSIONS})`);
   if (API_KEY) log("info", "API key authentication enabled");
   if (WORKSPACE_DIR) log("info", `Workspace: ${WORKSPACE_DIR}`);

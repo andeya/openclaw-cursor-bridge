@@ -136,7 +136,7 @@ Sessions are persisted to disk and reused via `--resume` for faster subsequent r
 - **Interactive model selection** — `setup`/`upgrade` present all discovered models via `@clack/prompts` (single-select primary, multi-select ordered fallbacks)
 - **Dynamic model discovery** — models auto-detected from `cursor-agent --list-models`, synced to OpenClaw on every gateway start
 - **Real-time streaming** — `--stream-partial-output` for character-level text deltas; instant result by default (plugin config `instantResult`), with optional smart-chunked fallback
-- **Thinking forwarding** — optionally stream LLM reasoning (plugin config `forwardThinking`): `"reasoning_content"` via standard field, `"content"` as markdown blockquote in message body (compatible with OpenClaw Feishu/Slack streaming cards)
+- **Thinking forwarding** — optionally stream LLM reasoning (plugin config `forwardThinking`): `"off"` (default) drop; `"reasoning_content"` via standard field; `"content"` as markdown blockquote in message body (compatible with OpenClaw Feishu/Slack streaming cards)
 - **Rich tool descriptions** — MCP server instructions include token extraction rules, exact action keys, and parameter examples from SKILL.md — reducing unnecessary `openclaw_skill` calls
 - **Tool call logging** — proxy logs every tool invocation with name, arguments summary, duration, and call ID for diagnostics
 - **Tool auto-discovery** — disk-based registration from SKILL.md at startup (no Gateway dependency); background verification for diagnostics; cached with 60s TTL
@@ -167,7 +167,7 @@ Primary and fallback models are **not** in plugin config; they are stored in `ag
 <details>
 <summary><strong>Plugin config & env</strong></summary>
 
-**Proxy options** (timeout, retry thresholds, streaming) are configured only in **openclaw.json** under `plugins.entries.openclaw-cursor-brain.config`. OpenClaw allows custom fields there; the plugin syncs them to `~/.openclaw/cursor-proxy.json` when starting the proxy, and the proxy reads that file (no custom env vars). Set e.g. `requestTimeout`, `degradedTimeout`, `maxConsecutiveFailures`, `maxConsecutiveTimeouts`, `streamResolveGraceMs`, `instantResult`, `forwardThinking`, `streamSpeed` in plugin config. The file is **not** removed on uninstall (reinstall keeps your settings). **Upgrade** preserves plugin config in openclaw.json (requestTimeout, etc.): the upgrade command saves it before uninstall and restores it after install; cursor-proxy.json is merge-only so existing file values are kept.
+**Single source of truth:** Proxy options are configured **only** in **openclaw.json** under `plugins.entries.openclaw-cursor-brain.config`. The proxy always reads from openclaw.json: when started by the gateway it uses `OPENCLAW_CONFIG_PATH`; when run **standalone** (`node streaming-proxy.mjs`) it defaults to `~/.openclaw/openclaw.json`. No separate config file. **Uninstall** stops the proxy and removes any legacy `cursor-proxy.json`; **upgrade** preserves plugin config in openclaw.json.
 
 | Variable                    | Default  | Description                          |
 | --------------------------- | -------- | ------------------------------------ |

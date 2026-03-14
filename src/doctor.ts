@@ -131,8 +131,9 @@ export function runDoctorChecks(opts: {
     } else {
       checks.push({ ok: false, label: "Cursor mcp.json", detail: `File does not exist: ${mcpConfigPath}` });
     }
-  } catch (e: any) {
-    checks.push({ ok: false, label: "Cursor mcp.json", detail: `Parse error: ${e.message}` });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    checks.push({ ok: false, label: "Cursor mcp.json", detail: `Parse error: ${msg}` });
   }
 
   // OpenClaw config

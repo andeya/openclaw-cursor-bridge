@@ -100,11 +100,11 @@ export function discoverCursorModels(
       lastError = e;
     }
     if (attempt < retries) {
-      logger?.warn(`Model discovery attempt ${attempt + 1} failed (${lastError?.message}), retrying...`);
+      logger?.warn(`Model discovery attempt ${attempt + 1} failed (${lastError instanceof Error ? lastError.message : String(lastError)}), retrying...`);
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
     }
   }
-  logger?.warn(`Could not list cursor-agent models after ${retries + 1} attempts: ${lastError?.message}`);
+  logger?.warn(`Could not list cursor-agent models after ${retries + 1} attempts: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
   return [];
 }
 

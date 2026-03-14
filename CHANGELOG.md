@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.3] - 2026-03-14
+
+### Changed
+
+- **forwardThinking** config: semantic string enum `"off"` | `"content"` | `"reasoning_content"` (replaces boolean / `"true"`/`"false"`), default `"off"`; avoids config validation errors when value is string
+- Docs/README/technical-guide (EN/ZH): forwardThinking described with semantic values; proxy startup log shows `Thinking: off` when disabled
+
+### Fixed
+
+- Streaming proxy: removed duplicate `recordTimeout()` call when `!hasContent` and headers already sent (was double-counting consecutive timeouts)
+- EADDRINUSE on proxy restart: `server.listen` uses `reuseAddress: true`; gateway waits 300ms after port free before spawning proxy
+- Error handling: defensive `e?.message ?? String(e)` / `result.error?.message ?? String(result.error)` in index.ts, setup.ts, uninstall.mjs, streaming-proxy.mjs, server.mjs; doctor.ts mcp.json parse error uses `e: unknown`
+
 ## [1.4.0] - 2026-03-05
 
 ### Added
