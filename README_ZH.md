@@ -136,7 +136,7 @@ flowchart TD
 - **交互式模型选择** — `setup`/`upgrade` 通过 `@clack/prompts` 展示所有发现的模型（主模型单选，备用模型按顺序多选）
 - **动态模型发现** — 自动从 `cursor-agent --list-models` 获取模型列表，每次 Gateway 启动时同步
 - **实时流式** — `--stream-partial-output` 逐字输出；批量结果默认即时发送（插件 config `instantResult`），可选智能分块回退
-- **推理过程转发** — 可选通过 `reasoning_content` 流式输出 LLM 推理过程（插件 config `forwardThinking`）
+- **推理过程转发** — 可选流式输出 LLM 推理过程（插件 config `forwardThinking`）：`"reasoning_content"` 通过标准字段转发，`"content"` 以 markdown 引用格式嵌入正文（兼容 OpenClaw 飞书/Slack 等流式卡片）
 - **丰富工具描述** — MCP 服务器指令包含 token 提取规则、精确 action 键和参数示例（来自 SKILL.md），减少不必要的 `openclaw_skill` 调用
 - **工具调用日志** — proxy 记录每个工具调用的名称、参数摘要、耗时和 call ID，便于诊断
 - **工具自动发现** — 启动时从磁盘 SKILL.md 直接注册（不依赖 Gateway）；后台异步验证用于诊断；60s TTL 缓存

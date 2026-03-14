@@ -57,9 +57,12 @@
         "description": "Send batch results instantly. Synced to cursor-proxy.json."
       },
       "forwardThinking": {
-        "type": "boolean",
+        "oneOf": [
+          { "type": "boolean" },
+          { "type": "string", "enum": ["content", "reasoning_content"] }
+        ],
         "default": false,
-        "description": "Stream LLM reasoning as reasoning_content. Synced to cursor-proxy.json."
+        "description": "Stream LLM reasoning. false=drop, true/'reasoning_content'=as reasoning_content field, 'content'=as regular content (markdown blockquote, compatible with OpenClaw streaming cards). Synced to cursor-proxy.json."
       },
       "streamSpeed": {
         "type": "number",

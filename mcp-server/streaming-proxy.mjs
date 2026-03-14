@@ -57,7 +57,12 @@ const API_KEY = process.env.CURSOR_PROXY_API_KEY || proxyConfigFile.apiKey || ""
 const OUTPUT_FORMAT = process.env.CURSOR_OUTPUT_FORMAT || proxyConfigFile.outputFormat || "stream-json";
 // Model is taken from each request (gateway-specified); no global override.
 
-const FORWARD_THINKING = fromConfig("forwardThinking", false, (v) => v === true || v === "true");
+const RAW_FORWARD_THINKING = fromConfig("forwardThinking", false, (v) => {
+  if (v === "content") return "content";
+  if (v === true || v === "true" || v === "reasoning_content") return "reasoning_content";
+  return false;
+});
+const FORWARD_THINKING = RAW_FORWARD_THINKING !== false;
 const INSTANT_RESULT = fromConfig("instantResult", true, (v) => v !== false && v !== "false");
 const TARGET_CHARS_PER_SEC = parseInt(fromConfig("streamSpeed", "200"), 10) || 200;
 const SHORT_TEXT_THRESHOLD = 100;
@@ -386,6 +391,8 @@ function processStreamOutput(child, { requestId, model, sessionKey, res, streamS
     let resultText = "";
     let hasStreamedContent = false;
     let error = null;
+    let thinkingPhase = false;
+    let thinkingEnded = false;
     const toolCalls = new Map();
 
     const done = () => {
@@ -429,21 +436,41 @@ function processStreamOutput(child, { requestId, model, sessionKey, res, streamS
       }
 
       if (type === "thinking") {
-        if (FORWARD_THINKING && parsed.text) {
-          hasStreamedContent = true;
-          if (streamState) ensureStreamHeaders(res, streamState);
-          const delta = { reasoning_content: parsed.text };
-          const chunk = {
-            id: requestId, object: "chat.completion.chunk",
-            created: Math.floor(Date.now() / 1000), model,
-            choices: [{ index: 0, delta, finish_reason: null }],
-          };
-          res.write("data: " + JSON.stringify(chunk) + "\n\n");
+        if (FORWARD_THINKING) {
+          if (parsed.subtype === "completed") {
+            thinkingEnded = true;
+            return;
+          }
+          if (parsed.text) {
+            hasStreamedContent = true;
+            if (streamState) ensureStreamHeaders(res, streamState);
+            if (RAW_FORWARD_THINKING === "content") {
+              let prefix = "";
+              if (!thinkingPhase) {
+                thinkingPhase = true;
+                prefix = "> 💭 ";
+              }
+              const text = prefix + parsed.text.replace(/\n/g, "\n> ");
+              res.write(sseEvent(requestId, model, { content: text }));
+            } else {
+              const delta = { reasoning_content: parsed.text };
+              const chunk = {
+                id: requestId, object: "chat.completion.chunk",
+                created: Math.floor(Date.now() / 1000), model,
+                choices: [{ index: 0, delta, finish_reason: null }],
+              };
+              res.write("data: " + JSON.stringify(chunk) + "\n\n");
+            }
+          }
         }
         return;
       }
 
       if (type === "text" && parsed.text) {
+        if (RAW_FORWARD_THINKING === "content" && thinkingEnded && thinkingPhase) {
+          thinkingPhase = false;
+          res.write(sseEvent(requestId, model, { content: "\n\n---\n\n" }));
+        }
         hasStreamedContent = true;
         if (streamState) ensureStreamHeaders(res, streamState);
         res.write(sseEvent(requestId, model, { content: parsed.text }));
@@ -773,7 +800,7 @@ async function handleNonStream(req, res, body) {
           message: {
             role: "assistant",
             content: result.resultText,
-            ...(result.thinkingText ? { reasoning_content: result.thinkingText } : {}),
+            ...(result.thinkingText && RAW_FORWARD_THINKING === "reasoning_content" ? { reasoning_content: result.thinkingText } : {}),
           },
           finish_reason: "stop",
         }],
@@ -901,7 +928,7 @@ server.listen(PORT, "127.0.0.1", () => {
   } else {
     log("warn", "cursor-agent not found — all /v1/chat/completions requests will fail. Set CURSOR_PATH or install Cursor.");
   }
-  log("info", `Model: from request (gateway), Format: ${OUTPUT_FORMAT}, Partial: on, Thinking: ${FORWARD_THINKING ? "forward" : "drop"}, InstantResult: ${INSTANT_RESULT}, SessionAuto: true`);
+  log("info", `Model: from request (gateway), Format: ${OUTPUT_FORMAT}, Partial: on, Thinking: ${RAW_FORWARD_THINKING || "drop"}, InstantResult: ${INSTANT_RESULT}, SessionAuto: true`);
   log("info", `Sessions loaded: ${sessions.size} (max ${MAX_SESSIONS})`);
   if (API_KEY) log("info", "API key authentication enabled");
   if (WORKSPACE_DIR) log("info", `Workspace: ${WORKSPACE_DIR}`);

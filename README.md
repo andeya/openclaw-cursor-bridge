@@ -136,7 +136,7 @@ Sessions are persisted to disk and reused via `--resume` for faster subsequent r
 - **Interactive model selection** — `setup`/`upgrade` present all discovered models via `@clack/prompts` (single-select primary, multi-select ordered fallbacks)
 - **Dynamic model discovery** — models auto-detected from `cursor-agent --list-models`, synced to OpenClaw on every gateway start
 - **Real-time streaming** — `--stream-partial-output` for character-level text deltas; instant result by default (plugin config `instantResult`), with optional smart-chunked fallback
-- **Thinking forwarding** — optionally stream LLM reasoning via `reasoning_content` (plugin config `forwardThinking`)
+- **Thinking forwarding** — optionally stream LLM reasoning (plugin config `forwardThinking`): `"reasoning_content"` via standard field, `"content"` as markdown blockquote in message body (compatible with OpenClaw Feishu/Slack streaming cards)
 - **Rich tool descriptions** — MCP server instructions include token extraction rules, exact action keys, and parameter examples from SKILL.md — reducing unnecessary `openclaw_skill` calls
 - **Tool call logging** — proxy logs every tool invocation with name, arguments summary, duration, and call ID for diagnostics
 - **Tool auto-discovery** — disk-based registration from SKILL.md at startup (no Gateway dependency); background verification for diagnostics; cached with 60s TTL
