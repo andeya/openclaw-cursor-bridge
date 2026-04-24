@@ -59,5 +59,10 @@
   "devDependencies": {
     "@types/node": "^25.4.0",
     "typescript": "^5.7.0"
+  },
+  "overrides": {
+    "@hono/node-server": "1.19.13",
+    "hono": "4.12.15",
+    "path-to-regexp": "8.4.2"
   }
 }

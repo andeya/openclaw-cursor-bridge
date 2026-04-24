@@ -246,7 +246,7 @@ function setSession(key, value) {
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 function mapRequestModel(reqModel) {
-  if (!reqModel || reqModel === "auto") return "";
+  if (!reqModel) return "";
   return reqModel;
 }
 
